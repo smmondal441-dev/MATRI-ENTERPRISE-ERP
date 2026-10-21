@@ -902,7 +902,7 @@ export const SalesReturnService = {
 export const BackupService = {
   async export(): Promise<string> {
     const data = {
-      meta: {
+      _meta: {
         app: 'FMCG ERP',
         version: 5,
         exported_at: new Date().toISOString(),
@@ -917,6 +917,7 @@ export const BackupService = {
       damages: await db.damages.toArray(),
       purchase_returns: await db.purchase_returns.toArray(),
       sales_returns: await db.sales_returns.toArray(),
+      meta: await db.meta.toArray(),
     }
     return JSON.stringify(data, null, 2)
   },
@@ -928,7 +929,7 @@ export const BackupService = {
       [
         db.products, db.customers, db.purchases, db.sales, db.sale_items,
         db.collections, db.distributor_settings, db.damages,
-        db.purchase_returns, db.sales_returns,
+        db.purchase_returns, db.sales_returns, db.meta,
       ],
       async () => {
         await db.products.clear()
@@ -941,6 +942,7 @@ export const BackupService = {
         await db.damages.clear()
         await db.purchase_returns.clear()
         await db.sales_returns.clear()
+        await db.meta.clear()
         // v5 — imported records are marked un-synced so they get pushed to the
         // PostgreSQL backend on the next sync cycle.
         const markUnsynced = (arr: any[]) =>
@@ -955,21 +957,46 @@ export const BackupService = {
         if (data.damages?.length) await db.damages.bulkPut(markUnsynced(data.damages))
         if (data.purchase_returns?.length) await db.purchase_returns.bulkPut(markUnsynced(data.purchase_returns))
         if (data.sales_returns?.length) await db.sales_returns.bulkPut(markUnsynced(data.sales_returns))
+        // Restore meta table (or set seeded=true if backup predates the meta table)
+        if (data.meta?.length) {
+          await db.meta.bulkPut(data.meta)
+        } else {
+          await db.meta.put({ key: 'seeded', value: true })
+        }
       }
     )
     // After import, push everything to the backend (if online).
     scheduleSync('products')
   },
 
+  /**
+   * Seed sample data ONLY on the very first launch of the app.
+   *
+   * Uses a `meta` table flag (`seeded = true`) to ensure seeding runs exactly
+   * once per browser. After the first seed, subsequent page refreshes will
+   * find `seeded = true` in the meta table and skip seeding entirely — even
+   * if the user has deleted all products/customers.
+   *
+   * This is the critical fix for the "IndexedDB overwrite on page refresh"
+   * bug: previously, seedIfEmpty() checked `productCount === 0`, which meant
+   * deleting all products and refreshing the page would re-inject mock data.
+   * Now the meta flag persists across refreshes and is never reset.
+   */
   async seedIfEmpty(): Promise<void> {
-    const productCount = await db.products.count()
-    const customerCount = await db.customers.count()
+    // Check the meta table first — if `seeded` flag exists, NEVER re-seed.
+    const alreadySeeded = await db.meta.get('seeded')
+    if (alreadySeeded?.value === true) {
+      // The DB has been initialized before. Do NOT seed, do NOT overwrite.
+      // IndexedDB is the single source of truth.
+      return
+    }
+
+    // First-ever launch — seed sample data.
     // v5 — seeded records are marked un-synced so the SyncService will push
     // them to the PostgreSQL backend on first launch (if configured).
     const UNSYNCED = { isSynced: false, synced_at: null }
-    if (productCount === 0) {
-      const now = new Date().toISOString()
-      await db.products.bulkAdd([
+    const now = new Date().toISOString()
+    await db.products.bulkAdd([
         {
           sku: 'PARLE-G-001',
           company_name: 'Parle Products',
@@ -1088,10 +1115,7 @@ export const BackupService = {
           ...UNSYNCED,
         },
       ])
-    }
-    if (customerCount === 0) {
-      const now = new Date().toISOString()
-      await db.customers.bulkAdd([
+    await db.customers.bulkAdd([
         {
           customer_id: 'CUST-0001',
           name: 'Sharma General Store',
@@ -1133,23 +1157,24 @@ export const BackupService = {
           ...UNSYNCED,
         },
       ])
-    }
-    const settings = await db.distributor_settings.count()
-    if (settings === 0) {
-      await db.distributor_settings.add({
-        store_name: 'MATRI ENTERPRISE',
-        subtitle: 'Distributor Of: Too Yumm / Trsna Water',
-        gstin: '19DSFPM8845F1Z8',
-        address: '51, ELACHI CHAKRABORTYPARA ROAD, KOLKATA-700 151',
-        phone: '8777746395 / 9874532121',
-        email: '',
-        invoice_prefix: 'INV',
-        state: 'West Bengal (19)',
-        bank_details:
-          'Bandhan Bank, Rajpur Branch | A/c No: 20100077079708 | IFSC: BDBL0001028',
-        isSynced: false,
-        synced_at: null,
-      })
-    }
+    await db.distributor_settings.add({
+      store_name: 'MATRI ENTERPRISE',
+      subtitle: 'Distributor Of: Too Yumm / Trsna Water',
+      gstin: '19DSFPM8845F1Z8',
+      address: '51, ELACHI CHAKRABORTYPARA ROAD, KOLKATA-700 151',
+      phone: '8777746395 / 9874532121',
+      email: '',
+      invoice_prefix: 'INV',
+      state: 'West Bengal (19)',
+      bank_details:
+        'Bandhan Bank, Rajpur Branch | A/c No: 20100077079708 | IFSC: BDBL0001028',
+      isSynced: false,
+      synced_at: null,
+    })
+
+    // Mark the database as seeded so this NEVER runs again, even if the user
+    // deletes all products/customers or refreshes the page while offline.
+    // This is the critical guard that makes IndexedDB the single source of truth.
+    await db.meta.put({ key: 'seeded', value: true })
   },
 }

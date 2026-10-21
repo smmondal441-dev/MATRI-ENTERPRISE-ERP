@@ -79,11 +79,22 @@ export default function Home() {
   useEffect(() => {
     ;(async () => {
       try {
+        // seedIfEmpty() now checks a `meta` table flag (`seeded = true`).
+        // If the flag exists (meaning the DB was initialized before), it
+        // returns immediately and does NOT overwrite any data.
+        // This runs only on the very first launch of the app in this browser.
         await BackupService.seedIfEmpty()
       } catch (e) {
-        // ignore seed errors (e.g. already seeded)
+        // Ignore seed errors (e.g. DB already opened, permission issues).
+        // The app will still read from IndexedDB — it just won't have seed
+        // data if this is truly the first launch and seeding failed.
         console.warn('Seed skipped:', e)
       }
+      // Always set booted = true, regardless of seeding outcome.
+      // The app reads from IndexedDB via useLiveQuery hooks, which will
+      // show whatever data is in the local DB (seed data on first launch,
+        // user data on subsequent visits). IndexedDB is the single source
+        // of truth.
       setBooted(true)
     })()
   }, [])

@@ -270,6 +270,16 @@ export interface SalesReturn {
 }
 
 // ----------------------------------------------------------------------------
+// Meta table — stores initialization flags so we never re-seed after the
+// first launch, even if the user deletes all products/customers.
+// ----------------------------------------------------------------------------
+
+export interface MetaRow {
+  key: string
+  value: any
+}
+
+// ----------------------------------------------------------------------------
 // Dexie database class
 // ----------------------------------------------------------------------------
 
@@ -284,6 +294,7 @@ export class FmcgDatabase extends Dexie {
   damages!: Table<Damage, number>
   purchase_returns!: Table<PurchaseReturn, number>
   sales_returns!: Table<SalesReturn, number>
+  meta!: Table<MetaRow, string>
 
   constructor() {
     super('FmcgErpDatabase')
@@ -339,6 +350,13 @@ export class FmcgDatabase extends Dexie {
         '++id, date, return_no, supplier_name, supplier_gstin, product_id, product_sku, created_at, isSynced',
       sales_returns:
         '++id, date, return_no, customer_id, customer_name, product_id, product_sku, restock, created_at, isSynced',
+    })
+    // v6 — Meta table for tracking initialization state.
+    // This prevents re-seeding mock data on page refresh even if the user has
+    // deleted all products/customes. The `seeded` flag is set once on first
+    // launch and never re-checked against table counts again.
+    this.version(6).stores({
+      meta: 'key',
     })
   }
 }
