@@ -1,0 +1,338 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+:root {
+  --radius: 0.625rem;
+  /* FMCG ERP — emerald primary, slate neutrals, no indigo/blue by default */
+  --background: oklch(0.99 0.005 150);
+  --foreground: oklch(0.18 0.02 200);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.18 0.02 200);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.18 0.02 200);
+  --primary: oklch(0.55 0.13 162);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0.01 150);
+  --secondary-foreground: oklch(0.25 0.04 162);
+  --muted: oklch(0.97 0.01 150);
+  --muted-foreground: oklch(0.5 0.02 200);
+  --accent: oklch(0.93 0.05 162);
+  --accent-foreground: oklch(0.25 0.04 162);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.9 0.01 150);
+  --input: oklch(0.92 0.01 150);
+  --ring: oklch(0.55 0.13 162);
+  --chart-1: oklch(0.55 0.13 162);
+  --chart-2: oklch(0.65 0.18 50);
+  --chart-3: oklch(0.6 0.15 220);
+  --chart-4: oklch(0.78 0.16 80);
+  --chart-5: oklch(0.7 0.18 350);
+  --sidebar: oklch(0.98 0.005 150);
+  --sidebar-foreground: oklch(0.18 0.02 200);
+  --sidebar-primary: oklch(0.55 0.13 162);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.93 0.05 162);
+  --sidebar-accent-foreground: oklch(0.25 0.04 162);
+  --sidebar-border: oklch(0.9 0.01 150);
+  --sidebar-ring: oklch(0.55 0.13 162);
+}
+
+.dark {
+  --background: oklch(0.14 0.01 200);
+  --foreground: oklch(0.98 0.005 150);
+  --card: oklch(0.2 0.015 200);
+  --card-foreground: oklch(0.98 0.005 150);
+  --popover: oklch(0.2 0.015 200);
+  --popover-foreground: oklch(0.98 0.005 150);
+  --primary: oklch(0.65 0.15 162);
+  --primary-foreground: oklch(0.18 0.02 200);
+  --secondary: oklch(0.27 0.02 200);
+  --secondary-foreground: oklch(0.98 0.005 150);
+  --muted: oklch(0.27 0.02 200);
+  --muted-foreground: oklch(0.7 0.02 200);
+  --accent: oklch(0.3 0.05 162);
+  --accent-foreground: oklch(0.98 0.005 150);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.65 0.15 162);
+  --chart-1: oklch(0.65 0.15 162);
+  --chart-2: oklch(0.7 0.18 50);
+  --chart-3: oklch(0.7 0.18 220);
+  --chart-4: oklch(0.78 0.16 80);
+  --chart-5: oklch(0.7 0.18 350);
+  --sidebar: oklch(0.18 0.015 200);
+  --sidebar-foreground: oklch(0.98 0.005 150);
+  --sidebar-primary: oklch(0.65 0.15 162);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.3 0.05 162);
+  --sidebar-accent-foreground: oklch(0.98 0.005 150);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: oklch(0.65 0.15 162);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+/* ----------------------------------------------------------------------------
+ * Custom scrollbar (long tables, sidebar lists)
+ * -------------------------------------------------------------------------- */
+.scrollbar-thin::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: oklch(0.78 0.02 200);
+  border-radius: 8px;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb:hover {
+  background: oklch(0.7 0.03 200);
+}
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ----------------------------------------------------------------------------
+ * Print-friendly invoice / compact A5 memo layout
+ *
+ * STRATEGY (robust print isolation):
+ *   1. Hide ALL UI chrome by default — `nav`, `aside` (sidebar), `header`
+ *      (top bar), `button`, and anything marked `.no-print` gets
+ *      `display: none !important`. This removes them from the print render
+ *      tree entirely (not just invisible — they take zero space).
+ *   2. Reset the modal root (`.print-modal-root`) — when the invoice modal
+ *      is open, it has `position: fixed; inset: 0; overflow-y: auto;
+ *      background: black/50`. These properties confuse print engines. In
+ *      print mode we neutralise them so the modal root becomes a normal
+ *      static block element that flows naturally onto the page.
+ *   3. Force the printable area (`.print-area`, `#printable-invoice`) and
+ *      all its descendants to `display: block` + `visibility: visible` so
+ *      nothing inside gets accidentally hidden.
+ *   4. Compact A5 sizing — `@page { size: A5 portrait; margin: 5mm; }` and
+ *      the memo-slip is capped at 148mm width.
+ *
+ * Only the printable invoice is rendered; everything else is removed.
+ * -------------------------------------------------------------------------- */
+@media print {
+  /* ---- Step 1: Hide ALL non-print UI chrome ---- */
+  /* `display: none` removes these from the render tree entirely — they take
+     zero space and don't interfere with the printable area's layout. */
+  nav,
+  aside,
+  header,
+  button,
+  .no-print,
+  .scrollbar-thin,
+  /* Sidebar + top bar specific to this app */
+  [role="banner"],
+  /* Toast notifications */
+  [data-sonner-toaster],
+  [role="region"][aria-label*="Notifications"],
+  /* SyncStatusBadge etc. */
+  .sync-status-badge {
+    display: none !important;
+  }
+
+  /* ---- Step 2: Reset the modal root container ---- */
+  /* The printable invoice modal is rendered with `position: fixed; inset: 0;
+     overflow-y: auto; background: black/50; z-index: 100` so it overlays the
+     screen. In print mode these properties would clip the content. We reset
+     them so the modal root becomes a normal static block that flows onto the
+     printed page. */
+  .print-modal-root,
+  .print-modal-root > * {
+    position: static !important;
+    inset: auto !important;
+    top: auto !important;
+    left: auto !important;
+    right: auto !important;
+    bottom: auto !important;
+    overflow: visible !important;
+    max-height: none !important;
+    height: auto !important;
+    width: auto !important;
+    max-width: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    border: none !important;
+    border-radius: 0 !important;
+    z-index: auto !important;
+    display: block !important;
+  }
+
+  /* The intermediate wrapper div inside the modal root (max-w-3xl) — reset
+     its max-width so the memo-slip can use its own 148mm constraint. */
+  .print-modal-root > div {
+    max-width: none !important;
+    width: auto !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+
+  /* ---- Step 3: Force-print the invoice area ---- */
+  /* The printable invoice container + all its descendants are forced visible.
+     `display: block` is the safe default that works for all element types
+     (div, table, tr, td, span, etc.). */
+  .print-area,
+  #printable-invoice,
+  .print-area *,
+  #printable-invoice * {
+    visibility: visible !important;
+    display: block !important;
+  }
+
+  /* But table-related elements need their native display values to render
+     correctly as a table — override the `display: block` above. */
+  .print-area table,
+  #printable-invoice table {
+    display: table !important;
+    border-collapse: collapse !important;
+    width: 100% !important;
+  }
+  .print-area thead,
+  #printable-invoice thead {
+    display: table-header-group !important;
+  }
+  .print-area tbody,
+  #printable-invoice tbody {
+    display: table-row-group !important;
+  }
+  .print-area tr,
+  #printable-invoice tr {
+    display: table-row !important;
+  }
+  .print-area th,
+  .print-area td,
+  #printable-invoice th,
+  #printable-invoice td {
+    display: table-cell !important;
+  }
+
+  /* The printable area itself — compact A5 memo styling */
+  .print-area,
+  #printable-invoice {
+    position: static !important;
+    margin: 0 !important;
+    padding: 4mm 5mm !important;
+    width: auto !important;
+    max-width: 148mm !important;
+    box-shadow: none !important;
+    border: none !important;
+    border-radius: 0 !important;
+    background: #ffffff !important;
+    color: #000000 !important;
+    font-size: 9.5px !important;
+    line-height: 1.25 !important;
+  }
+
+  /* Make all colors solid black for printers without grayscale */
+  .print-area *,
+  #printable-invoice *,
+  .print-area,
+  #printable-invoice {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+    color: #000000 !important;
+    background-color: #ffffff !important;
+    border-color: #000000 !important;
+  }
+
+  /* Re-apply visible thin borders on memo table cells */
+  .print-area .memo-table th,
+  .print-area .memo-table td,
+  #printable-invoice .memo-table th,
+  #printable-invoice .memo-table td {
+    border: 0.5pt solid #000000 !important;
+    padding: 1.5pt 3pt !important;
+  }
+
+  /* Avoid breaking rows across pages */
+  .print-area tr,
+  #printable-invoice tr,
+  .print-area .memo-row,
+  #printable-invoice .memo-row {
+    page-break-inside: avoid !important;
+    break-inside: avoid !important;
+  }
+
+  /* Keep the entire memo slip on one page when possible */
+  .print-area.memo-slip,
+  #printable-invoice.memo-slip {
+    page-break-inside: avoid !important;
+    break-inside: avoid !important;
+  }
+
+  /* --------------------------------------------------------------------------
+   * Page sizing — A5 portrait is the primary target.
+   * 5mm margin gives maximum printable area while keeping clean edges.
+   *
+   * For A4 paper users: the memo (148mm wide × ~190mm tall) fits in the top
+   * half of an A4 sheet (210mm × 297mm). To print two memos on one A4:
+   *   1. Set printer paper to A4, orientation Portrait.
+   *   2. Print the first invoice (appears at top).
+   *   3. Re-feed the same sheet and print the second invoice — it will land
+   *      on the bottom half naturally because the memo is shorter than A4/2.
+   *
+   * Alternatively, the browser print dialog supports "Pages per sheet: 2"
+   * which places two A5 pages side-by-side or stacked on one A4.
+   * ------------------------------------------------------------------------ */
+  @page {
+    margin: 5mm;
+    size: A5 portrait;
+  }
+  /* A4 fallback — printer auto-selects if A5 unavailable */
+  @page a4 {
+    margin: 8mm;
+    size: A4 portrait;
+  }
+}
