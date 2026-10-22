@@ -17,7 +17,7 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
+  provider = "cockroachdb"
   url      = env("DATABASE_URL")
 }
 
@@ -286,7 +286,7 @@ model SalesReturn {
 // ----------------------------------------------------------------------------
 
 model SyncAuditLog {
-  id           Int      @id @default(autoincrement())
+  id           Int      @id @default(sequence())
   eventType    String   @map("event_type") // 'push' | 'pull' | 'online' | 'offline' | 'error'
   entityType   String?  @map("entity_type") // 'product' | 'sale' | ...
   entityId     Int?     @map("entity_id")
