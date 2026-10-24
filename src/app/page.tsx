@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { BackupService } from '@/lib/services/repository'
+import { pullFromServer } from '@/lib/services/sync'
 import type { LucideIcon } from 'lucide-react'
 import {
   LayoutDashboard,
@@ -78,23 +79,47 @@ export default function Home() {
 
   useEffect(() => {
     ;(async () => {
+      // ---- Multi-device boot sequence ----
+      // 1. Check if local IndexedDB has been initialized before (meta `seeded` flag).
+      // 2. If NOT seeded (truly first launch on this device):
+      //    a. Try pulling real data from CockroachDB first.
+      //    b. If pull succeeds (server has data), use it — skip seeding.
+      //    c. If pull fails (server unreachable or empty), fall back to local seed.
+      // 3. If already seeded (returning visitor), skip everything — IndexedDB is
+      //    the single source of truth.
+
       try {
-        // seedIfEmpty() now checks a `meta` table flag (`seeded = true`).
-        // If the flag exists (meaning the DB was initialized before), it
-        // returns immediately and does NOT overwrite any data.
-        // This runs only on the very first launch of the app in this browser.
-        await BackupService.seedIfEmpty()
+        // Check the meta flag — has this device been initialized before?
+        const { db } = await import('@/lib/db/dexie')
+        const alreadySeeded = await db.meta.get('seeded')
+
+        if (!alreadySeeded?.value) {
+          // First launch on this device — try pulling from server first.
+          console.log('[boot] First launch — attempting pull from server...')
+          const pullResult = await pullFromServer()
+
+          if (pullResult.ok && pullResult.totalRecords > 0) {
+            console.log('[boot] Pulled', pullResult.totalRecords, 'records from server. Skipping seed.')
+          } else {
+            console.log('[boot] Pull failed or server empty. Falling back to local seed.')
+            await BackupService.seedIfEmpty()
+          }
+        } else {
+          // Already initialized — IndexedDB is the source of truth. No action needed.
+          // seedIfEmpty() would also detect this and return immediately, but we
+          // skip the call entirely to avoid an unnecessary DB read.
+        }
       } catch (e) {
-        // Ignore seed errors (e.g. DB already opened, permission issues).
-        // The app will still read from IndexedDB — it just won't have seed
-        // data if this is truly the first launch and seeding failed.
-        console.warn('Seed skipped:', e)
+        // If anything goes wrong (DB not open, network error, etc.),
+        // fall back to seeding so the app at least has some data to show.
+        console.warn('[boot] Initialization error, falling back to seed:', e)
+        try {
+          await BackupService.seedIfEmpty()
+        } catch (seedErr) {
+          console.warn('[boot] Seed also failed:', seedErr)
+        }
       }
-      // Always set booted = true, regardless of seeding outcome.
-      // The app reads from IndexedDB via useLiveQuery hooks, which will
-      // show whatever data is in the local DB (seed data on first launch,
-        // user data on subsequent visits). IndexedDB is the single source
-        // of truth.
+
       setBooted(true)
     })()
   }, [])

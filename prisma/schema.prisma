@@ -1,15 +1,17 @@
 // ============================================================================
-// FMCG Distribution House ERP — Prisma schema (PostgreSQL backend)
+// FMCG Distribution House ERP — Prisma schema (PostgreSQL / CockroachDB)
 // ----------------------------------------------------------------------------
-// This schema mirrors the local Dexie.js (IndexedDB) tables so that the
-// offline-first SyncService can push local records up to a central
-// PostgreSQL database for backup / multi-device sync.
+// v2 — CockroachDB-safe ID strategy
 //
-// Provider: postgresql
-// Connection: DATABASE_URL env var (e.g. postgresql://user:pass@host:5432/db)
+// Each table has TWO ID columns:
+//   - `id`     Int @id @default(autoincrement())  — server-generated, never
+//              conflicts with client IDs
+//   - `localId` Int @unique                        — the client-side Dexie ID,
+//              used as the upsert match key
 //
-// All tables use the local Dexie `id` (auto-increment integer) as the primary
-// key so that the SyncService can upsert by the same id on the server side.
+// This prevents primary-key collisions between local IndexedDB auto-increment
+// IDs and server-generated sequence IDs. The sync push endpoint matches on
+// `localId`, not `id`.
 // ============================================================================
 
 generator client {
@@ -26,7 +28,8 @@ datasource db {
 // ----------------------------------------------------------------------------
 
 model Product {
-  id                            Int      @id
+  id                            BigInt   @id @default(autoincrement())
+  localId                       Int      @unique @map("local_id")
   sku                           String
   companyName                   String   @map("company_name")
   name                          String
@@ -36,24 +39,18 @@ model Product {
   outerUnit                     String   @map("outer_unit")
   conversionFactor             Float    @map("conversion_factor")
   packSize                      String?  @map("pack_size")
-
-  // v4 per-piece pricing
   purchaseRatePerOuterUnit      Float    @map("purchase_rate_per_outer_unit")
   purchaseRatePerPiece          Float    @map("purchase_rate_per_piece")
   sellingRatePerPiece           Float    @map("selling_rate_per_piece")
   sellingRatePerOuterUnit       Float    @map("selling_rate_per_outer_unit")
-
-  // Legacy aliases (kept for backward compat with v1-v3 client rows)
   purchaseRate                  Float?   @map("purchase_rate")
   salesRate                     Float?   @map("sales_rate")
   purchaseRatePerPcs            Float?   @map("purchase_rate_per_pcs")
   salesRatePerPcs               Float?   @map("sales_rate_per_pcs")
-
   gstPercent                    Float    @map("gst_percent")
   openingStockPcs               Float    @map("opening_stock_pcs")
   createdAt                     DateTime @map("created_at")
   syncedAt                      DateTime? @map("synced_at")
-
   @@map("products")
 }
 
@@ -62,7 +59,8 @@ model Product {
 // ----------------------------------------------------------------------------
 
 model Customer {
-  id              Int      @id
+  id              BigInt   @id @default(autoincrement())
+  localId         Int      @unique @map("local_id")
   customerId      String   @map("customer_id")
   name            String
   routeArea       String   @map("route_area")
@@ -71,7 +69,6 @@ model Customer {
   openingBalance  Float    @map("opening_balance")
   createdAt       DateTime @map("created_at")
   syncedAt        DateTime? @map("synced_at")
-
   @@map("customers")
 }
 
@@ -80,7 +77,8 @@ model Customer {
 // ----------------------------------------------------------------------------
 
 model Purchase {
-  id              Int      @id
+  id              BigInt   @id @default(autoincrement())
+  localId         Int      @unique @map("local_id")
   billNo          String   @map("bill_no")
   date            String
   supplierName    String   @map("supplier_name")
@@ -100,7 +98,6 @@ model Purchase {
   totalAmount     Float    @map("total_amount")
   createdAt       DateTime @map("created_at")
   syncedAt        DateTime? @map("synced_at")
-
   @@map("purchases")
 }
 
@@ -109,7 +106,8 @@ model Purchase {
 // ----------------------------------------------------------------------------
 
 model Sale {
-  id                  Int      @id
+  id                  BigInt   @id @default(autoincrement())
+  localId             Int      @unique @map("local_id")
   invoiceNo           String   @map("invoice_no")
   date                String
   customerId          Int      @map("customer_id")
@@ -124,7 +122,6 @@ model Sale {
   paidAmount          Float    @map("paid_amount")
   createdAt           DateTime @map("created_at")
   syncedAt            DateTime? @map("synced_at")
-
   @@map("sales")
 }
 
@@ -133,8 +130,9 @@ model Sale {
 // ----------------------------------------------------------------------------
 
 model SaleItem {
-  id                  Int      @id
-  saleId              Int      @map("sale_id")
+  id                  BigInt   @id @default(autoincrement())
+  localId             Int      @unique @map("local_id")
+  saleLocalId         Int      @map("sale_local_id")
   productId           Int      @map("product_id")
   productName         String   @map("product_name")
   productSku          String   @map("product_sku")
@@ -151,7 +149,6 @@ model SaleItem {
   itemMarginPercent   Float    @map("item_margin_percent")
   createdAt           DateTime @default(now()) @map("created_at")
   syncedAt            DateTime? @map("synced_at")
-
   @@map("sale_items")
 }
 
@@ -160,7 +157,8 @@ model SaleItem {
 // ----------------------------------------------------------------------------
 
 model Collection {
-  id              Int      @id
+  id              BigInt   @id @default(autoincrement())
+  localId         Int      @unique @map("local_id")
   date            String
   customerId      Int      @map("customer_id")
   customerName    String   @map("customer_name")
@@ -169,7 +167,6 @@ model Collection {
   notes           String?
   createdAt       DateTime @map("created_at")
   syncedAt        DateTime? @map("synced_at")
-
   @@map("collections")
 }
 
@@ -178,7 +175,8 @@ model Collection {
 // ----------------------------------------------------------------------------
 
 model DistributorSetting {
-  id              Int      @id
+  id              BigInt   @id @default(autoincrement())
+  localId         Int      @unique @map("local_id")
   storeName       String   @map("store_name")
   subtitle        String?
   gstin           String
@@ -190,7 +188,6 @@ model DistributorSetting {
   state           String
   bankDetails     String?  @map("bank_details")
   syncedAt        DateTime? @map("synced_at")
-
   @@map("distributor_settings")
 }
 
@@ -199,7 +196,8 @@ model DistributorSetting {
 // ----------------------------------------------------------------------------
 
 model Damage {
-  id              Int      @id
+  id              BigInt   @id @default(autoincrement())
+  localId         Int      @unique @map("local_id")
   date            String
   productId       Int      @map("product_id")
   productSku      String   @map("product_sku")
@@ -213,7 +211,6 @@ model Damage {
   expenseValue    Float    @map("expense_value")
   createdAt       DateTime @map("created_at")
   syncedAt        DateTime? @map("synced_at")
-
   @@map("damages")
 }
 
@@ -222,12 +219,13 @@ model Damage {
 // ----------------------------------------------------------------------------
 
 model PurchaseReturn {
-  id                       Int      @id
+  id                       BigInt   @id @default(autoincrement())
+  localId                  Int      @unique @map("local_id")
   date                     String
   originalPurchaseId       Int?     @map("original_purchase_id")
   returnNo                 String   @map("return_no")
   supplierName             String   @map("supplier_name")
-  supplierGstin             String?  @map("supplier_gstin")
+  supplierGstin            String?  @map("supplier_gstin")
   productId                Int      @map("product_id")
   productSku               String   @map("product_sku")
   productName              String   @map("product_name")
@@ -245,7 +243,6 @@ model PurchaseReturn {
   reason                   String?
   createdAt                DateTime @map("created_at")
   syncedAt                 DateTime? @map("synced_at")
-
   @@map("purchase_returns")
 }
 
@@ -254,7 +251,8 @@ model PurchaseReturn {
 // ----------------------------------------------------------------------------
 
 model SalesReturn {
-  id                  Int      @id
+  id                  BigInt   @id @default(autoincrement())
+  localId             Int      @unique @map("local_id")
   date                String
   originalSaleId      Int?     @map("original_sale_id")
   returnNo            String   @map("return_no")
@@ -277,23 +275,21 @@ model SalesReturn {
   reason              String?
   createdAt           DateTime @map("created_at")
   syncedAt            DateTime? @map("synced_at")
-
   @@map("sales_returns")
 }
 
 // ----------------------------------------------------------------------------
-// SyncAuditLog — optional audit trail of sync events for debugging
+// SyncAuditLog — audit trail of sync events for debugging
 // ----------------------------------------------------------------------------
 
 model SyncAuditLog {
-  id           Int      @id @default(sequence())
-  eventType    String   @map("event_type") // 'push' | 'pull' | 'online' | 'offline' | 'error'
-  entityType   String?  @map("entity_type") // 'product' | 'sale' | ...
+  id           BigInt   @id @default(autoincrement())
+  eventType    String   @map("event_type")
+  entityType   String?  @map("entity_type")
   entityId     Int?     @map("entity_id")
   recordCount  Int?     @map("record_count")
-  status       String   // 'success' | 'failure' | 'partial'
+  status       String
   message      String?
   createdAt    DateTime @default(now()) @map("created_at")
-
   @@map("sync_audit_logs")
 }

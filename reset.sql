@@ -1,0 +1,11 @@
+ALTER TABLE products SET (schema_locked = false);
+ALTER TABLE customers SET (schema_locked = false);
+ALTER TABLE purchases SET (schema_locked = false);
+ALTER TABLE sales SET (schema_locked = false);
+ALTER TABLE sale_items SET (schema_locked = false);
+ALTER TABLE collections SET (schema_locked = false);
+ALTER TABLE distributor_settings SET (schema_locked = false);
+ALTER TABLE damages SET (schema_locked = false);
+ALTER TABLE purchase_returns SET (schema_locked = false);
+ALTER TABLE sales_returns SET (schema_locked = false);
+ALTER TABLE sync_audit_logs SET (schema_locked = false);

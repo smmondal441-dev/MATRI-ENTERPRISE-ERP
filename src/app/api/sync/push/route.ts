@@ -2,39 +2,38 @@
 // POST /api/sync/push
 // ----------------------------------------------------------------------------
 // Receives a batch of locally-created records from the offline-first ERP and
-// upserts them into PostgreSQL via Prisma.
+// upserts them into PostgreSQL / CockroachDB via Prisma.
+//
+// STRATEGY (v2 — CockroachDB-safe):
+//   - The server table has its own auto-increment `id` (primary key) PLUS a
+//     `local_id` column that stores the client-side Dexie ID.
+//   - Upserts match on `localId` (not `id`), so there's never a conflict
+//     between client-provided IDs and server-generated sequence IDs.
+//   - If a record with the same `localId` already exists, we update its data
+//     fields. If not, we create a new row with a server-generated `id` and
+//     the client's `localId`.
+//   - Every failed record is logged to console.error with full detail so the
+//     developer can trace exact database rejection reasons.
 //
 // Request body:
-//   {
-//     "batches": {
-//       "products": [{...}, {...}],
-//       "customers": [{...}],
-//       "sales": [{...}],
-//       ...
-//     }
-//   }
+//   { "batches": { "products": [{...}], "customers": [{...}], ... } }
 //
 // Response:
 //   {
 //     "success": true,
-//     "results": {
-//       "products": { "count": 5, "ids": [1, 2, 3, 4, 5] },
-//       "customers": { "count": 1, "ids": [10] },
-//       ...
-//     },
+//     "results": { "products": { "count": 5, "ids": [1, 2, 3, 4, 5] } },
 //     "errors": []
 //   }
-//
-// All records are upserted by their local Dexie `id` (the primary key). The
-// server echoes back the IDs that were successfully synced so the client can
-// flip their `isSynced` flag to true.
 // ============================================================================
 
 import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 
-// Disable static optimization — this is a dynamic API route
 export const dynamic = 'force-dynamic'
+
+// ----------------------------------------------------------------------------
+// Types
+// ----------------------------------------------------------------------------
 
 interface BatchPayload {
   products?: any[]
@@ -61,318 +60,332 @@ interface PushResponse {
 }
 
 // ----------------------------------------------------------------------------
-// Per-entity upsert handlers — each takes a record and returns its id.
-// All fields use Prisma's upsert (create-or-update) so re-pushing the same
-// record is idempotent.
+// Helper — safe number coercion
+// ----------------------------------------------------------------------------
+
+function num(val: any, fallback = 0): number {
+  const n = Number(val)
+  return isNaN(n) ? fallback : n
+}
+
+function str(val: any, fallback = ''): string {
+  if (val === null || val === undefined) return fallback
+  return String(val)
+}
+
+function nullableStr(val: any): string | null {
+  if (val === null || val === undefined || val === '') return null
+  return String(val)
+}
+
+function dateOrNow(val: any): Date {
+  if (val) {
+    const d = new Date(val)
+    if (!isNaN(d.getTime())) return d
+  }
+  return new Date()
+}
+
+// ----------------------------------------------------------------------------
+// Per-entity upsert handlers
+// ----------------------------------------------------------------------------
+// Each handler:
+//   1. Extracts the local Dexie `id` from the record
+//   2. Uses Prisma `upsert` with `where: { localId: <dexie_id> }`
+//   3. On create: lets the server auto-generate the `id` column
+//   4. On update: refreshes all data fields (not just syncedAt)
+//   5. Returns the local ID so the client can mark isSynced=true
+//
+// IMPORTANT: The `localId` column must exist in the Prisma schema with a
+// @@unique constraint. See prisma/schema.prisma for the updated models.
 // ----------------------------------------------------------------------------
 
 async function upsertProduct(rec: any): Promise<number> {
+  const localId = num(rec.id)
+  const data = {
+    localId,
+    sku: str(rec.sku),
+    companyName: str(rec.company_name),
+    name: str(rec.name),
+    category: nullableStr(rec.category),
+    hsnCode: str(rec.hsn_code),
+    baseUnit: str(rec.base_unit, 'Pcs'),
+    outerUnit: str(rec.outer_unit, 'Bag'),
+    conversionFactor: num(rec.conversion_factor, 1),
+    packSize: nullableStr(rec.pack_size),
+    purchaseRatePerOuterUnit: num(rec.purchase_rate_per_outer_unit ?? rec.purchase_rate),
+    purchaseRatePerPiece: num(rec.purchase_rate_per_piece ?? rec.purchase_rate_per_pcs),
+    sellingRatePerPiece: num(rec.selling_rate_per_piece ?? rec.sales_rate_per_pcs),
+    sellingRatePerOuterUnit: num(rec.selling_rate_per_outer_unit ?? rec.sales_rate),
+    purchaseRate: rec.purchase_rate != null ? num(rec.purchase_rate) : null,
+    salesRate: rec.sales_rate != null ? num(rec.sales_rate) : null,
+    purchaseRatePerPcs: rec.purchase_rate_per_pcs != null ? num(rec.purchase_rate_per_pcs) : null,
+    salesRatePerPcs: rec.sales_rate_per_pcs != null ? num(rec.sales_rate_per_pcs) : null,
+    gstPercent: num(rec.gst_percent),
+    openingStockPcs: num(rec.opening_stock_pcs),
+    createdAt: dateOrNow(rec.created_at),
+    syncedAt: new Date(),
+  }
   const result = await db.product.upsert({
-    where: { id: Number(rec.id) },
-    create: {
-      id: Number(rec.id),
-      sku: String(rec.sku ?? ''),
-      companyName: String(rec.company_name ?? ''),
-      name: String(rec.name ?? ''),
-      category: rec.category ?? null,
-      hsnCode: String(rec.hsn_code ?? ''),
-      baseUnit: String(rec.base_unit ?? 'Pcs'),
-      outerUnit: String(rec.outer_unit ?? 'Bag'),
-      conversionFactor: Number(rec.conversion_factor ?? 1),
-      packSize: rec.pack_size ?? null,
-      purchaseRatePerOuterUnit: Number(rec.purchase_rate_per_outer_unit ?? rec.purchase_rate ?? 0),
-      purchaseRatePerPiece: Number(rec.purchase_rate_per_piece ?? rec.purchase_rate_per_pcs ?? 0),
-      sellingRatePerPiece: Number(rec.selling_rate_per_piece ?? rec.sales_rate_per_pcs ?? 0),
-      sellingRatePerOuterUnit: Number(rec.selling_rate_per_outer_unit ?? rec.sales_rate ?? 0),
-      purchaseRate: rec.purchase_rate ?? null,
-      salesRate: rec.sales_rate ?? null,
-      purchaseRatePerPcs: rec.purchase_rate_per_pcs ?? null,
-      salesRatePerPcs: rec.sales_rate_per_pcs ?? null,
-      gstPercent: Number(rec.gst_percent ?? 0),
-      openingStockPcs: Number(rec.opening_stock_pcs ?? 0),
-      createdAt: rec.created_at ? new Date(rec.created_at) : new Date(),
-      syncedAt: new Date(),
-    },
-    update: {
-      sku: String(rec.sku ?? ''),
-      companyName: String(rec.company_name ?? ''),
-      name: String(rec.name ?? ''),
-      category: rec.category ?? null,
-      hsnCode: String(rec.hsn_code ?? ''),
-      baseUnit: String(rec.base_unit ?? 'Pcs'),
-      outerUnit: String(rec.outer_unit ?? 'Bag'),
-      conversionFactor: Number(rec.conversion_factor ?? 1),
-      packSize: rec.pack_size ?? null,
-      purchaseRatePerOuterUnit: Number(rec.purchase_rate_per_outer_unit ?? rec.purchase_rate ?? 0),
-      purchaseRatePerPiece: Number(rec.purchase_rate_per_piece ?? rec.purchase_rate_per_pcs ?? 0),
-      sellingRatePerPiece: Number(rec.selling_rate_per_piece ?? rec.sales_rate_per_pcs ?? 0),
-      sellingRatePerOuterUnit: Number(rec.selling_rate_per_outer_unit ?? rec.sales_rate ?? 0),
-      purchaseRate: rec.purchase_rate ?? null,
-      salesRate: rec.sales_rate ?? null,
-      purchaseRatePerPcs: rec.purchase_rate_per_pcs ?? null,
-      salesRatePerPcs: rec.sales_rate_per_pcs ?? null,
-      gstPercent: Number(rec.gst_percent ?? 0),
-      openingStockPcs: Number(rec.opening_stock_pcs ?? 0),
-      syncedAt: new Date(),
-    },
+    where: { localId },
+    create: data,
+    update: data,
   })
-  return result.id
+  return localId
 }
 
 async function upsertCustomer(rec: any): Promise<number> {
+  const localId = num(rec.id)
+  const data = {
+    localId,
+    customerId: str(rec.customer_id),
+    name: str(rec.name),
+    routeArea: str(rec.route_area),
+    phone: str(rec.phone),
+    gstin: nullableStr(rec.gstin),
+    openingBalance: num(rec.opening_balance),
+    createdAt: dateOrNow(rec.created_at),
+    syncedAt: new Date(),
+  }
   const result = await db.customer.upsert({
-    where: { id: Number(rec.id) },
-    create: {
-      id: Number(rec.id),
-      customerId: String(rec.customer_id ?? ''),
-      name: String(rec.name ?? ''),
-      routeArea: String(rec.route_area ?? ''),
-      phone: String(rec.phone ?? ''),
-      gstin: rec.gstin ?? null,
-      openingBalance: Number(rec.opening_balance ?? 0),
-      createdAt: rec.created_at ? new Date(rec.created_at) : new Date(),
-      syncedAt: new Date(),
-    },
-    update: {
-      customerId: String(rec.customer_id ?? ''),
-      name: String(rec.name ?? ''),
-      routeArea: String(rec.route_area ?? ''),
-      phone: String(rec.phone ?? ''),
-      gstin: rec.gstin ?? null,
-      openingBalance: Number(rec.opening_balance ?? 0),
-      syncedAt: new Date(),
-    },
+    where: { localId },
+    create: data,
+    update: data,
   })
-  return result.id
+  return localId
 }
 
 async function upsertPurchase(rec: any): Promise<number> {
-  const result = await db.purchase.upsert({
-    where: { id: Number(rec.id) },
-    create: {
-      id: Number(rec.id),
-      billNo: String(rec.bill_no ?? ''),
-      date: String(rec.date ?? ''),
-      supplierName: String(rec.supplier_name ?? ''),
-      supplierGstin: rec.supplier_gstin ?? null,
-      productId: Number(rec.product_id ?? 0),
-      productSku: String(rec.product_sku ?? ''),
-      productName: String(rec.product_name ?? ''),
-      hsnCode: String(rec.hsn_code ?? ''),
-      bagQty: Number(rec.bag_qty ?? 0),
-      pcsQty: Number(rec.pcs_qty ?? 0),
-      totalPcs: Number(rec.total_pcs ?? 0),
-      purchaseRate: Number(rec.purchase_rate ?? 0),
-      gstPercent: Number(rec.gst_percent ?? 0),
-      taxableAmount: Number(rec.taxable_amount ?? 0),
-      cgst: Number(rec.cgst ?? 0),
-      sgst: Number(rec.sgst ?? 0),
-      totalAmount: Number(rec.total_amount ?? 0),
-      createdAt: rec.created_at ? new Date(rec.created_at) : new Date(),
-      syncedAt: new Date(),
-    },
-    update: { syncedAt: new Date() },
+  const localId = num(rec.id)
+  const data = {
+    localId,
+    billNo: str(rec.bill_no),
+    date: str(rec.date),
+    supplierName: str(rec.supplier_name),
+    supplierGstin: nullableStr(rec.supplier_gstin),
+    productId: num(rec.product_id),
+    productSku: str(rec.product_sku),
+    productName: str(rec.product_name),
+    hsnCode: str(rec.hsn_code),
+    bagQty: num(rec.bag_qty),
+    pcsQty: num(rec.pcs_qty),
+    totalPcs: num(rec.total_pcs),
+    purchaseRate: num(rec.purchase_rate),
+    gstPercent: num(rec.gst_percent),
+    taxableAmount: num(rec.taxable_amount),
+    cgst: num(rec.cgst),
+    sgst: num(rec.sgst),
+    totalAmount: num(rec.total_amount),
+    createdAt: dateOrNow(rec.created_at),
+    syncedAt: new Date(),
+  }
+  await db.purchase.upsert({
+    where: { localId },
+    create: data,
+    update: data,
   })
-  return result.id
+  return localId
 }
 
 async function upsertSale(rec: any): Promise<number> {
-  const result = await db.sale.upsert({
-    where: { id: Number(rec.id) },
-    create: {
-      id: Number(rec.id),
-      invoiceNo: String(rec.invoice_no ?? ''),
-      date: String(rec.date ?? ''),
-      customerId: Number(rec.customer_id ?? 0),
-      customerName: String(rec.customer_name ?? ''),
-      paymentMode: String(rec.payment_mode ?? 'Cash'),
-      subtotal: Number(rec.subtotal ?? 0),
-      cgst: Number(rec.cgst ?? 0),
-      sgst: Number(rec.sgst ?? 0),
-      totalAmount: Number(rec.total_amount ?? 0),
-      totalProfit: Number(rec.total_profit ?? 0),
-      totalMarginPercent: Number(rec.total_margin_percent ?? 0),
-      paidAmount: Number(rec.paid_amount ?? 0),
-      createdAt: rec.created_at ? new Date(rec.created_at) : new Date(),
-      syncedAt: new Date(),
-    },
-    update: { syncedAt: new Date() },
+  const localId = num(rec.id)
+  const data = {
+    localId,
+    invoiceNo: str(rec.invoice_no),
+    date: str(rec.date),
+    customerId: num(rec.customer_id),
+    customerName: str(rec.customer_name),
+    paymentMode: str(rec.payment_mode, 'Cash'),
+    subtotal: num(rec.subtotal),
+    cgst: num(rec.cgst),
+    sgst: num(rec.sgst),
+    totalAmount: num(rec.total_amount),
+    totalProfit: num(rec.total_profit),
+    totalMarginPercent: num(rec.total_margin_percent),
+    paidAmount: num(rec.paid_amount),
+    createdAt: dateOrNow(rec.created_at),
+    syncedAt: new Date(),
+  }
+  await db.sale.upsert({
+    where: { localId },
+    create: data,
+    update: data,
   })
-  return result.id
+  return localId
 }
 
 async function upsertSaleItem(rec: any): Promise<number> {
-  const result = await db.saleItem.upsert({
-    where: { id: Number(rec.id) },
-    create: {
-      id: Number(rec.id),
-      saleId: Number(rec.sale_id ?? 0),
-      productId: Number(rec.product_id ?? 0),
-      productName: String(rec.product_name ?? ''),
-      productSku: String(rec.product_sku ?? ''),
-      hsnCode: String(rec.hsn_code ?? ''),
-      quantityPcs: Number(rec.quantity_pcs ?? 0),
-      rate: Number(rec.rate ?? 0),
-      gstPercent: Number(rec.gst_percent ?? 0),
-      taxableAmount: Number(rec.taxable_amount ?? 0),
-      cgst: Number(rec.cgst ?? 0),
-      sgst: Number(rec.sgst ?? 0),
-      total: Number(rec.total ?? 0),
-      purchaseRate: Number(rec.purchase_rate ?? 0),
-      itemProfit: Number(rec.item_profit ?? 0),
-      itemMarginPercent: Number(rec.item_margin_percent ?? 0),
-      syncedAt: new Date(),
-    },
-    update: { syncedAt: new Date() },
+  const localId = num(rec.id)
+  const data = {
+    localId,
+    saleLocalId: num(rec.sale_id),
+    productId: num(rec.product_id),
+    productName: str(rec.product_name),
+    productSku: str(rec.product_sku),
+    hsnCode: str(rec.hsn_code),
+    quantityPcs: num(rec.quantity_pcs),
+    rate: num(rec.rate),
+    gstPercent: num(rec.gst_percent),
+    taxableAmount: num(rec.taxable_amount),
+    cgst: num(rec.cgst),
+    sgst: num(rec.sgst),
+    total: num(rec.total),
+    purchaseRate: num(rec.purchase_rate),
+    itemProfit: num(rec.item_profit),
+    itemMarginPercent: num(rec.item_margin_percent),
+    syncedAt: new Date(),
+  }
+  await db.saleItem.upsert({
+    where: { localId },
+    create: data,
+    update: data,
   })
-  return result.id
+  return localId
 }
 
 async function upsertCollection(rec: any): Promise<number> {
-  const result = await db.collection.upsert({
-    where: { id: Number(rec.id) },
-    create: {
-      id: Number(rec.id),
-      date: String(rec.date ?? ''),
-      customerId: Number(rec.customer_id ?? 0),
-      customerName: String(rec.customer_name ?? ''),
-      amount: Number(rec.amount ?? 0),
-      paymentMode: String(rec.payment_mode ?? 'Cash'),
-      notes: rec.notes ?? null,
-      createdAt: rec.created_at ? new Date(rec.created_at) : new Date(),
-      syncedAt: new Date(),
-    },
-    update: { syncedAt: new Date() },
+  const localId = num(rec.id)
+  const data = {
+    localId,
+    date: str(rec.date),
+    customerId: num(rec.customer_id),
+    customerName: str(rec.customer_name),
+    amount: num(rec.amount),
+    paymentMode: str(rec.payment_mode, 'Cash'),
+    notes: nullableStr(rec.notes),
+    createdAt: dateOrNow(rec.created_at),
+    syncedAt: new Date(),
+  }
+  await db.collection.upsert({
+    where: { localId },
+    create: data,
+    update: data,
   })
-  return result.id
+  return localId
 }
 
 async function upsertDistributorSetting(rec: any): Promise<number> {
-  const result = await db.distributorSetting.upsert({
-    where: { id: Number(rec.id) },
-    create: {
-      id: Number(rec.id),
-      storeName: String(rec.store_name ?? ''),
-      subtitle: rec.subtitle ?? null,
-      gstin: String(rec.gstin ?? ''),
-      address: String(rec.address ?? ''),
-      phone: String(rec.phone ?? ''),
-      email: String(rec.email ?? ''),
-      logoUrl: rec.logo_url ?? null,
-      invoicePrefix: String(rec.invoice_prefix ?? 'INV'),
-      state: String(rec.state ?? ''),
-      bankDetails: rec.bank_details ?? null,
-      syncedAt: new Date(),
-    },
-    update: {
-      storeName: String(rec.store_name ?? ''),
-      subtitle: rec.subtitle ?? null,
-      gstin: String(rec.gstin ?? ''),
-      address: String(rec.address ?? ''),
-      phone: String(rec.phone ?? ''),
-      email: String(rec.email ?? ''),
-      logoUrl: rec.logo_url ?? null,
-      invoicePrefix: String(rec.invoice_prefix ?? 'INV'),
-      state: String(rec.state ?? ''),
-      bankDetails: rec.bank_details ?? null,
-      syncedAt: new Date(),
-    },
+  const localId = num(rec.id)
+  const data = {
+    localId,
+    storeName: str(rec.store_name),
+    subtitle: nullableStr(rec.subtitle),
+    gstin: str(rec.gstin),
+    address: str(rec.address),
+    phone: str(rec.phone),
+    email: str(rec.email),
+    logoUrl: nullableStr(rec.logo_url),
+    invoicePrefix: str(rec.invoice_prefix, 'INV'),
+    state: str(rec.state),
+    bankDetails: nullableStr(rec.bank_details),
+    syncedAt: new Date(),
+  }
+  await db.distributorSetting.upsert({
+    where: { localId },
+    create: data,
+    update: data,
   })
-  return result.id
+  return localId
 }
 
 async function upsertDamage(rec: any): Promise<number> {
-  const result = await db.damage.upsert({
-    where: { id: Number(rec.id) },
-    create: {
-      id: Number(rec.id),
-      date: String(rec.date ?? ''),
-      productId: Number(rec.product_id ?? 0),
-      productSku: String(rec.product_sku ?? ''),
-      productName: String(rec.product_name ?? ''),
-      hsnCode: String(rec.hsn_code ?? ''),
-      bagQty: Number(rec.bag_qty ?? 0),
-      pcsQty: Number(rec.pcs_qty ?? 0),
-      totalPcs: Number(rec.total_pcs ?? 0),
-      reason: String(rec.reason ?? 'Broken'),
-      notes: rec.notes ?? null,
-      expenseValue: Number(rec.expense_value ?? 0),
-      createdAt: rec.created_at ? new Date(rec.created_at) : new Date(),
-      syncedAt: new Date(),
-    },
-    update: { syncedAt: new Date() },
+  const localId = num(rec.id)
+  const data = {
+    localId,
+    date: str(rec.date),
+    productId: num(rec.product_id),
+    productSku: str(rec.product_sku),
+    productName: str(rec.product_name),
+    hsnCode: str(rec.hsn_code),
+    bagQty: num(rec.bag_qty),
+    pcsQty: num(rec.pcs_qty),
+    totalPcs: num(rec.total_pcs),
+    reason: str(rec.reason, 'Broken'),
+    notes: nullableStr(rec.notes),
+    expenseValue: num(rec.expense_value),
+    createdAt: dateOrNow(rec.created_at),
+    syncedAt: new Date(),
+  }
+  await db.damage.upsert({
+    where: { localId },
+    create: data,
+    update: data,
   })
-  return result.id
+  return localId
 }
 
 async function upsertPurchaseReturn(rec: any): Promise<number> {
-  const result = await db.purchaseReturn.upsert({
-    where: { id: Number(rec.id) },
-    create: {
-      id: Number(rec.id),
-      date: String(rec.date ?? ''),
-      originalPurchaseId: rec.original_purchase_id ?? null,
-      returnNo: String(rec.return_no ?? ''),
-      supplierName: String(rec.supplier_name ?? ''),
-      supplierGstin: rec.supplier_gstin ?? null,
-      productId: Number(rec.product_id ?? 0),
-      productSku: String(rec.product_sku ?? ''),
-      productName: String(rec.product_name ?? ''),
-      hsnCode: String(rec.hsn_code ?? ''),
-      bagQty: Number(rec.bag_qty ?? 0),
-      pcsQty: Number(rec.pcs_qty ?? 0),
-      totalPcs: Number(rec.total_pcs ?? 0),
-      purchaseRate: Number(rec.purchase_rate ?? 0),
-      purchaseRatePerPcs: Number(rec.purchase_rate_per_pcs ?? 0),
-      gstPercent: Number(rec.gst_percent ?? 0),
-      taxableAmount: Number(rec.taxable_amount ?? 0),
-      cgst: Number(rec.cgst ?? 0),
-      sgst: Number(rec.sgst ?? 0),
-      totalAmount: Number(rec.total_amount ?? 0),
-      reason: rec.reason ?? null,
-      createdAt: rec.created_at ? new Date(rec.created_at) : new Date(),
-      syncedAt: new Date(),
-    },
-    update: { syncedAt: new Date() },
+  const localId = num(rec.id)
+  const data = {
+    localId,
+    date: str(rec.date),
+    originalPurchaseId: rec.original_purchase_id != null ? num(rec.original_purchase_id) : null,
+    returnNo: str(rec.return_no),
+    supplierName: str(rec.supplier_name),
+    supplierGstin: nullableStr(rec.supplier_gstin),
+    productId: num(rec.product_id),
+    productSku: str(rec.product_sku),
+    productName: str(rec.product_name),
+    hsnCode: str(rec.hsn_code),
+    bagQty: num(rec.bag_qty),
+    pcsQty: num(rec.pcs_qty),
+    totalPcs: num(rec.total_pcs),
+    purchaseRate: num(rec.purchase_rate),
+    purchaseRatePerPcs: num(rec.purchase_rate_per_pcs),
+    gstPercent: num(rec.gst_percent),
+    taxableAmount: num(rec.taxable_amount),
+    cgst: num(rec.cgst),
+    sgst: num(rec.sgst),
+    totalAmount: num(rec.total_amount),
+    reason: nullableStr(rec.reason),
+    createdAt: dateOrNow(rec.created_at),
+    syncedAt: new Date(),
+  }
+  await db.purchaseReturn.upsert({
+    where: { localId },
+    create: data,
+    update: data,
   })
-  return result.id
+  return localId
 }
 
 async function upsertSalesReturn(rec: any): Promise<number> {
-  const result = await db.salesReturn.upsert({
-    where: { id: Number(rec.id) },
-    create: {
-      id: Number(rec.id),
-      date: String(rec.date ?? ''),
-      originalSaleId: rec.original_sale_id ?? null,
-      returnNo: String(rec.return_no ?? ''),
-      customerId: Number(rec.customer_id ?? 0),
-      customerName: String(rec.customer_name ?? ''),
-      productId: Number(rec.product_id ?? 0),
-      productSku: String(rec.product_sku ?? ''),
-      productName: String(rec.product_name ?? ''),
-      hsnCode: String(rec.hsn_code ?? ''),
-      bagQty: Number(rec.bag_qty ?? 0),
-      pcsQty: Number(rec.pcs_qty ?? 0),
-      totalPcs: Number(rec.total_pcs ?? 0),
-      salesRatePerPcs: Number(rec.sales_rate_per_pcs ?? 0),
-      gstPercent: Number(rec.gst_percent ?? 0),
-      taxableAmount: Number(rec.taxable_amount ?? 0),
-      cgst: Number(rec.cgst ?? 0),
-      sgst: Number(rec.sgst ?? 0),
-      totalAmount: Number(rec.total_amount ?? 0),
-      restock: Boolean(rec.restock ?? false),
-      reason: rec.reason ?? null,
-      createdAt: rec.created_at ? new Date(rec.created_at) : new Date(),
-      syncedAt: new Date(),
-    },
-    update: { syncedAt: new Date() },
+  const localId = num(rec.id)
+  const data = {
+    localId,
+    date: str(rec.date),
+    originalSaleId: rec.original_sale_id != null ? num(rec.original_sale_id) : null,
+    returnNo: str(rec.return_no),
+    customerId: num(rec.customer_id),
+    customerName: str(rec.customer_name),
+    productId: num(rec.product_id),
+    productSku: str(rec.product_sku),
+    productName: str(rec.product_name),
+    hsnCode: str(rec.hsn_code),
+    bagQty: num(rec.bag_qty),
+    pcsQty: num(rec.pcs_qty),
+    totalPcs: num(rec.total_pcs),
+    salesRatePerPcs: num(rec.sales_rate_per_pcs),
+    gstPercent: num(rec.gst_percent),
+    taxableAmount: num(rec.taxable_amount),
+    cgst: num(rec.cgst),
+    sgst: num(rec.sgst),
+    totalAmount: num(rec.total_amount),
+    restock: Boolean(rec.restock ?? false),
+    reason: nullableStr(rec.reason),
+    createdAt: dateOrNow(rec.created_at),
+    syncedAt: new Date(),
+  }
+  await db.salesReturn.upsert({
+    where: { localId },
+    create: data,
+    update: data,
   })
-  return result.id
+  return localId
 }
 
 // ----------------------------------------------------------------------------
-// Entity name → upsert function map
+// Entity name -> upsert function map
 // ----------------------------------------------------------------------------
 
 const UPSERT_HANDLERS: Record<
@@ -411,6 +424,19 @@ export async function POST(req: NextRequest) {
   const results: Record<string, SyncResult> = {}
   const errors: PushResponse['errors'] = []
 
+  console.log('[sync/push] Received batch:', {
+    products: batches.products?.length ?? 0,
+    customers: batches.customers?.length ?? 0,
+    purchases: batches.purchases?.length ?? 0,
+    sales: batches.sales?.length ?? 0,
+    sale_items: batches.sale_items?.length ?? 0,
+    collections: batches.collections?.length ?? 0,
+    distributor_settings: batches.distributor_settings?.length ?? 0,
+    damages: batches.damages?.length ?? 0,
+    purchase_returns: batches.purchase_returns?.length ?? 0,
+    sales_returns: batches.sales_returns?.length ?? 0,
+  })
+
   for (const entityName of Object.keys(batches) as (keyof BatchPayload)[]) {
     const records = batches[entityName] ?? []
     if (records.length === 0) continue
@@ -430,6 +456,23 @@ export async function POST(req: NextRequest) {
         const id = await handler(rec)
         ids.push(id)
       } catch (e: any) {
+        // ---- DETAILED SERVER-SIDE LOGGING ----
+        // Log the full error to the server console so developers can trace
+        // exact database rejection reasons (constraint names, column names,
+        // SQL state codes, etc.)
+        console.error(`[sync/push] FAILED to upsert ${entityName} id=${rec?.id}:`, {
+          entity: entityName,
+          localId: rec?.id,
+          error: {
+            message: e?.message,
+            code: e?.code,
+            meta: e?.meta,
+            cause: e?.cause,
+            stack: e?.stack?.split('\n').slice(0, 5).join('\n'),
+          },
+          record: JSON.stringify(rec).slice(0, 500),
+        })
+
         errors.push({
           entity: entityName,
           id: rec?.id,
@@ -438,28 +481,40 @@ export async function POST(req: NextRequest) {
       }
     }
     results[entityName] = { count: ids.length, ids }
+
+    if (ids.length > 0) {
+      console.log(`[sync/push] ${entityName}: ${ids.length}/${records.length} synced OK`)
+    }
+    if (records.length - ids.length > 0) {
+      console.error(`[sync/push] ${entityName}: ${records.length - ids.length} FAILED`)
+    }
   }
 
+  const totalErrors = errors.length
+  const totalSynced = Object.values(results).reduce((s, r) => s + r.count, 0)
+  console.log(`[sync/push] Done: ${totalSynced} synced, ${totalErrors} errors`)
+
   return NextResponse.json({
-    success: errors.length === 0,
+    success: totalErrors === 0,
     results,
     errors,
   } satisfies PushResponse)
 }
 
 // ----------------------------------------------------------------------------
-// GET handler — health check / list of pending endpoints
+// GET handler — health check
 // ----------------------------------------------------------------------------
 
 export async function GET() {
   return NextResponse.json({
     ok: true,
-    service: 'FMCG ERP Sync — Push Endpoint',
-    version: 5,
+    service: 'FMCG ERP Sync — Push Endpoint (v2 CockroachDB-safe)',
+    version: 6,
+    strategy: 'upsert by localId (not by id) — server auto-generates id',
     endpoints: Object.keys(UPSERT_HANDLERS),
     usage:
       'POST a { batches: { products: [...], sales: [...] } } payload. ' +
-      'All records are upserted by their local Dexie id. Response includes ' +
-      'successfully-synced IDs per entity so the client can flip isSynced=true.',
+      'Records are upserted by their localId column. ' +
+      'Response includes successfully-synced local IDs per entity.',
   })
 }

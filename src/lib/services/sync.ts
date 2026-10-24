@@ -380,6 +380,151 @@ export async function triggerSyncNow(): Promise<void> {
 }
 
 // ----------------------------------------------------------------------------
+// PULL FROM SERVER — fetch all data from CockroachDB and merge into IndexedDB
+// ----------------------------------------------------------------------------
+// Used on first launch of a new device. Instead of injecting mock seed data,
+// the app calls this function to pull real data from the backend.
+//
+// The server returns all records with their original `localId` (which was the
+// creating device's Dexie ID). We store them in the local IndexedDB using that
+// same `id`, so future pushes match correctly via `where: { localId }`.
+//
+// All pulled records are marked `isSynced: true` since they came from the
+// server and don't need to be pushed back.
+// ----------------------------------------------------------------------------
+
+export interface PullResult {
+  ok: boolean
+  totalRecords: number
+  counts: Record<EntityName, number>
+  error?: string
+}
+
+export async function pullFromServer(): Promise<PullResult> {
+  const counts = emptyCounts()
+
+  if (typeof window === 'undefined') {
+    return { ok: false, totalRecords: 0, counts, error: 'Server-side render' }
+  }
+
+  if (!navigator.onLine) {
+    return { ok: false, totalRecords: 0, counts, error: 'Offline' }
+  }
+
+  try {
+    const res = await fetch('/api/sync/pull', {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json' },
+    })
+
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}))
+      return {
+        ok: false,
+        totalRecords: 0,
+        counts,
+        error: body?.error ?? `Server responded ${res.status}`,
+      }
+    }
+
+    const json = (await res.json()) as {
+      ok: boolean
+      pulledAt: string
+      totalRecords: number
+      data: {
+        products?: any[]
+        customers?: any[]
+        purchases?: any[]
+        sales?: any[]
+        sale_items?: any[]
+        collections?: any[]
+        distributor_settings?: any[]
+        damages?: any[]
+        purchase_returns?: any[]
+        sales_returns?: any[]
+      }
+    }
+
+    if (!json.ok || !json.data) {
+      return { ok: false, totalRecords: 0, counts, error: 'Invalid response' }
+    }
+
+    const data = json.data
+
+    // ---- Merge into local IndexedDB ----
+    // We use `bulkPut` (not `bulkAdd`) so that if a record with the same `id`
+    // already exists (e.g. from a previous partial pull), it gets overwritten
+    // with the latest server data.
+
+    if (data.products?.length) {
+      await db.products.bulkPut(data.products)
+      counts.products = data.products.length
+    }
+    if (data.customers?.length) {
+      await db.customers.bulkPut(data.customers)
+      counts.customers = data.customers.length
+    }
+    if (data.purchases?.length) {
+      await db.purchases.bulkPut(data.purchases)
+      counts.purchases = data.purchases.length
+    }
+    if (data.sales?.length) {
+      await db.sales.bulkPut(data.sales)
+      counts.sales = data.sales.length
+    }
+    if (data.sale_items?.length) {
+      await db.sale_items.bulkPut(data.sale_items)
+      counts.sale_items = data.sale_items.length
+    }
+    if (data.collections?.length) {
+      await db.collections.bulkPut(data.collections)
+      counts.collections = data.collections.length
+    }
+    if (data.distributor_settings?.length) {
+      await db.distributor_settings.bulkPut(data.distributor_settings)
+      counts.distributor_settings = data.distributor_settings.length
+    }
+    if (data.damages?.length) {
+      await db.damages.bulkPut(data.damages)
+      counts.damages = data.damages.length
+    }
+    if (data.purchase_returns?.length) {
+      await db.purchase_returns.bulkPut(data.purchase_returns)
+      counts.purchase_returns = data.purchase_returns.length
+    }
+    if (data.sales_returns?.length) {
+      await db.sales_returns.bulkPut(data.sales_returns)
+      counts.sales_returns = data.sales_returns.length
+    }
+
+    // ---- Mark the DB as seeded so seedIfEmpty() never runs ----
+    // The pulled data IS the real data — we don't want mock data injected.
+    await db.meta.put({ key: 'seeded', value: true })
+
+    const total = Object.values(counts).reduce((s, n) => s + n, 0)
+    console.log('[pullFromServer] Pulled', total, 'records from server:', counts)
+
+    // Update the pending counts (pulled records are isSynced=true, so counts
+    // should be 0 unless there were pre-existing un-synced local records).
+    await refreshPendingCounts()
+
+    return {
+      ok: true,
+      totalRecords: total,
+      counts,
+    }
+  } catch (e: any) {
+    console.error('[pullFromServer] Error:', e?.message ?? e)
+    return {
+      ok: false,
+      totalRecords: 0,
+      counts,
+      error: e?.message ?? String(e),
+    }
+  }
+}
+
+// ----------------------------------------------------------------------------
 // Helpers
 // ----------------------------------------------------------------------------
 
