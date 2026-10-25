@@ -60,6 +60,23 @@ interface PushResponse {
 }
 
 // ----------------------------------------------------------------------------
+// BigInt-safe JSON serialization helper
+// ----------------------------------------------------------------------------
+// Prisma returns BigInt for BigInt columns, but JSON.stringify() cannot
+// serialize BigInt natively (throws "Do not know how to serialize a BigInt").
+// This helper converts any BigInt values in the response to strings so they
+// survive JSON serialization. The client treats all IDs as numbers anyway
+// (via Number(rec.id)), so string BigInts are fine.
+// ----------------------------------------------------------------------------
+
+function bigIntReplacer(_key: string, value: any): any {
+  if (typeof value === 'bigint') {
+    return value.toString()
+  }
+  return value
+}
+
+// ----------------------------------------------------------------------------
 // Helper — safe number coercion
 // ----------------------------------------------------------------------------
 
@@ -494,11 +511,17 @@ export async function POST(req: NextRequest) {
   const totalSynced = Object.values(results).reduce((s, r) => s + r.count, 0)
   console.log(`[sync/push] Done: ${totalSynced} synced, ${totalErrors} errors`)
 
-  return NextResponse.json({
+  // Use BigInt-safe JSON serialization — Prisma may return BigInt values
+  // from upsert results, which JSON.stringify cannot handle natively.
+  const responseBody = {
     success: totalErrors === 0,
     results,
     errors,
-  } satisfies PushResponse)
+  } satisfies PushResponse
+
+  return new NextResponse(JSON.stringify(responseBody, bigIntReplacer), {
+    headers: { 'Content-Type': 'application/json' },
+  })
 }
 
 // ----------------------------------------------------------------------------
@@ -506,15 +529,18 @@ export async function POST(req: NextRequest) {
 // ----------------------------------------------------------------------------
 
 export async function GET() {
-  return NextResponse.json({
+  const body = {
     ok: true,
-    service: 'FMCG ERP Sync — Push Endpoint (v2 CockroachDB-safe)',
-    version: 6,
-    strategy: 'upsert by localId (not by id) — server auto-generates id',
+    service: 'FMCG ERP Sync — Push Endpoint (v3 BigInt-safe)',
+    version: 7,
+    strategy: 'upsert by localId (Int) — server auto-generates BigInt id',
     endpoints: Object.keys(UPSERT_HANDLERS),
     usage:
       'POST a { batches: { products: [...], sales: [...] } } payload. ' +
       'Records are upserted by their localId column. ' +
       'Response includes successfully-synced local IDs per entity.',
+  }
+  return new NextResponse(JSON.stringify(body, bigIntReplacer), {
+    headers: { 'Content-Type': 'application/json' },
   })
 }

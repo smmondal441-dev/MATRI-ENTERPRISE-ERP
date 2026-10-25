@@ -35,6 +35,23 @@ import { db } from '@/lib/db'
 
 export const dynamic = 'force-dynamic'
 
+// ----------------------------------------------------------------------------
+// BigInt-safe JSON serialization helper
+// ----------------------------------------------------------------------------
+// Prisma returns BigInt for BigInt columns (CockroachDB BIGINT). JSON.stringify
+// cannot serialize BigInt natively — it throws "Do not know how to serialize
+// a BigInt". This replacer converts any BigInt to a string so the response
+// survives JSON serialization. The client's num() helper then converts it
+// back to a JavaScript number via Number(val).
+// ----------------------------------------------------------------------------
+
+function bigIntReplacer(_key: string, value: any): any {
+  if (typeof value === 'bigint') {
+    return value.toString()
+  }
+  return value
+}
+
 export async function GET() {
   try {
     const [
@@ -279,7 +296,10 @@ export async function GET() {
 
     console.log(`[sync/pull] Returning ${totalRecords} records from CockroachDB`)
 
-    return NextResponse.json({
+    // Use BigInt-safe JSON serialization — Prisma may return BigInt values
+    // from BigInt columns (CockroachDB BIGINT), which JSON.stringify cannot
+    // handle natively. The bigIntReplacer converts BigInt → string.
+    const responseBody = {
       ok: true,
       pulledAt: new Date().toISOString(),
       totalRecords,
@@ -295,6 +315,10 @@ export async function GET() {
         purchase_returns: purchaseReturns.map(mapPurchaseReturn),
         sales_returns: salesReturns.map(mapSalesReturn),
       },
+    }
+
+    return new NextResponse(JSON.stringify(responseBody, bigIntReplacer), {
+      headers: { 'Content-Type': 'application/json' },
     })
   } catch (e: any) {
     console.error('[sync/pull] Database error:', {

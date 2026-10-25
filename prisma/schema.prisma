@@ -1,17 +1,18 @@
 // ============================================================================
-// FMCG Distribution House ERP — Prisma schema (PostgreSQL / CockroachDB)
+// FMCG Distribution House ERP — Prisma schema (CockroachDB)
 // ----------------------------------------------------------------------------
-// v2 — CockroachDB-safe ID strategy
+// v3 — BigInt primary keys for CockroachDB compatibility
 //
 // Each table has TWO ID columns:
-//   - `id`     Int @id @default(autoincrement())  — server-generated, never
-//              conflicts with client IDs
-//   - `localId` Int @unique                        — the client-side Dexie ID,
-//              used as the upsert match key
+//   - `id`      BigInt @id @default(autoincrement())  — server-generated 64-bit
+//               integer, never conflicts with client IDs
+//   - `localId` Int    @unique                       — the client-side Dexie ID
+//               (32-bit int from IndexedDB auto-increment), used as the upsert
+//               match key
 //
-// This prevents primary-key collisions between local IndexedDB auto-increment
-// IDs and server-generated sequence IDs. The sync push endpoint matches on
-// `localId`, not `id`.
+// Why BigInt? CockroachDB's unique_rowid() returns 64-bit integers. Using Int
+// (32-bit) for @default(autoincrement()) can overflow at 2^31 and cause
+// "value out of range" errors. BigInt maps to CockroachDB's BIGINT type.
 // ============================================================================
 
 generator client {
@@ -286,7 +287,7 @@ model SyncAuditLog {
   id           BigInt   @id @default(autoincrement())
   eventType    String   @map("event_type")
   entityType   String?  @map("entity_type")
-  entityId     Int?     @map("entity_id")
+  entityId     BigInt?  @map("entity_id")
   recordCount  Int?     @map("record_count")
   status       String
   message      String?
