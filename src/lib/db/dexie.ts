@@ -63,6 +63,7 @@ export interface Customer {
   phone: string
   gstin?: string
   opening_balance: number // opening dues (positive = customer owes us)
+  bill_number?: string // optional customer bill/reference number
   created_at: string
 
   // v5 — Hybrid sync
@@ -89,6 +90,8 @@ export interface Purchase {
   cgst: number
   sgst: number
   total_amount: number
+  mfg_date?: string // manufacturing date (YYYY-MM-DD), optional
+  expiry_date?: string // expiry date (YYYY-MM-DD), optional
   created_at: string
 
   // v5 — Hybrid sync

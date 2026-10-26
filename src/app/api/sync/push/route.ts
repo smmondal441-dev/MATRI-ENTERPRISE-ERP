@@ -161,6 +161,7 @@ async function upsertCustomer(rec: any): Promise<number> {
     phone: str(rec.phone),
     gstin: nullableStr(rec.gstin),
     openingBalance: num(rec.opening_balance),
+    billNumber: nullableStr(rec.bill_number),
     createdAt: dateOrNow(rec.created_at),
     syncedAt: new Date(),
   }
@@ -193,6 +194,8 @@ async function upsertPurchase(rec: any): Promise<number> {
     cgst: num(rec.cgst),
     sgst: num(rec.sgst),
     totalAmount: num(rec.total_amount),
+    mfgDate: nullableStr(rec.mfg_date),
+    expiryDate: nullableStr(rec.expiry_date),
     createdAt: dateOrNow(rec.created_at),
     syncedAt: new Date(),
   }

@@ -44,6 +44,8 @@ export function PurchaseEntry() {
   const [productId, setProductId] = useState<string>('')
   const [bagQty, setBagQty] = useState(0)
   const [pcsQty, setPcsQty] = useState(0)
+  const [mfgDate, setMfgDate] = useState('')
+  const [expiryDate, setExpiryDate] = useState('')
 
   const selectedProduct = useMemo(
     () => (products ?? []).find((p) => String(p.id) === productId),
@@ -76,6 +78,8 @@ export function PurchaseEntry() {
     setProductId('')
     setBagQty(0)
     setPcsQty(0)
+    setMfgDate('')
+    setExpiryDate('')
   }
 
   const save = async () => {
@@ -115,6 +119,8 @@ export function PurchaseEntry() {
         cgst,
         sgst,
         total_amount: totalAmount,
+        mfg_date: mfgDate || undefined,
+        expiry_date: expiryDate || undefined,
       })
       toast({
         title: 'Purchase recorded',
@@ -198,6 +204,20 @@ export function PurchaseEntry() {
                 min={0}
                 value={pcsQty}
                 onChange={(e) => setPcsQty(Number(e.target.value))}
+              />
+            </Field>
+            <Field label="MFG Date">
+              <Input
+                type="date"
+                value={mfgDate}
+                onChange={(e) => setMfgDate(e.target.value)}
+              />
+            </Field>
+            <Field label="Expiry Date">
+              <Input
+                type="date"
+                value={expiryDate}
+                onChange={(e) => setExpiryDate(e.target.value)}
               />
             </Field>
           </div>

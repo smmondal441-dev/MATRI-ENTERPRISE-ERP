@@ -68,6 +68,7 @@ model Customer {
   phone           String
   gstin           String?
   openingBalance  Float    @map("opening_balance")
+  billNumber      String?  @map("bill_number")
   createdAt       DateTime @map("created_at")
   syncedAt        DateTime? @map("synced_at")
   @@map("customers")
@@ -97,6 +98,8 @@ model Purchase {
   cgst            Float
   sgst            Float
   totalAmount     Float    @map("total_amount")
+  mfgDate         String?  @map("mfg_date")
+  expiryDate      String?  @map("expiry_date")
   createdAt       DateTime @map("created_at")
   syncedAt        DateTime? @map("synced_at")
   @@map("purchases")

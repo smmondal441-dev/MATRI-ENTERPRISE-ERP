@@ -35,6 +35,7 @@ interface FormState {
   route_area: string
   phone: string
   gstin: string
+  bill_number: string
   opening_balance: number
 }
 
@@ -44,6 +45,7 @@ const EMPTY: FormState = {
   route_area: '',
   phone: '',
   gstin: '',
+  bill_number: '',
   opening_balance: 0,
 }
 
@@ -81,6 +83,7 @@ export function CustomerMaster() {
       route_area: c.route_area,
       phone: c.phone,
       gstin: c.gstin ?? '',
+      bill_number: c.bill_number ?? '',
       opening_balance: c.opening_balance,
     })
     setEditingId(c.id ?? null)
@@ -163,6 +166,7 @@ export function CustomerMaster() {
                     <TableHead>Party Name</TableHead>
                     <TableHead>Route / Area</TableHead>
                     <TableHead>Phone</TableHead>
+                    <TableHead>Bill No.</TableHead>
                     <TableHead>GSTIN</TableHead>
                     <TableHead className="text-right">Opening Dues</TableHead>
                     <TableHead className="text-right">Actions</TableHead>
@@ -177,6 +181,9 @@ export function CustomerMaster() {
                       <TableCell className="font-medium">{c.name}</TableCell>
                       <TableCell className="text-xs">{c.route_area || '—'}</TableCell>
                       <TableCell className="text-xs">{c.phone || '—'}</TableCell>
+                      <TableCell className="font-mono text-xs">
+                        {c.bill_number || '—'}
+                      </TableCell>
                       <TableCell className="font-mono text-xs">
                         {c.gstin || '—'}
                       </TableCell>
@@ -256,6 +263,13 @@ export function CustomerMaster() {
                 onChange={(e) => setForm({ ...form, gstin: e.target.value })}
                 placeholder="29ABCDE1234F1Z5"
                 className="font-mono text-xs"
+              />
+            </Field>
+            <Field label="Bill Number">
+              <Input
+                value={form.bill_number}
+                onChange={(e) => setForm({ ...form, bill_number: e.target.value })}
+                placeholder="Optional reference / bill no."
               />
             </Field>
             <Field label="Opening Balance Dues (₹)">

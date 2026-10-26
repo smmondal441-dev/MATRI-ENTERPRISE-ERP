@@ -21,10 +21,13 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { useToast } from '@/hooks/use-toast'
-import { Warehouse, Search, Download, AlertTriangle } from 'lucide-react'
+import { Warehouse, Search, Download, AlertTriangle, Clock } from 'lucide-react'
+import { usePurchases } from '@/lib/hooks/use-erp'
+import { formatDate } from '@/lib/utils/format'
 
 export function Inventory() {
   const inventory = useInventory()
+  const purchases = usePurchases()
   const { toast } = useToast()
   const [search, setSearch] = useState('')
 
@@ -39,6 +42,34 @@ export function Inventory() {
         row.product.hsn_code.toLowerCase().includes(q)
     )
   }, [inventory, search])
+
+  // ---- Near-Expiry Computation (Phase 1 — Conservative) ----
+  // For each product, find the EARLIEST expiry_date across all purchase entries.
+  // This gives a conservative alert: "at least some stock of this product
+  // expires by [earliest date]." Stock math is 100% untouched.
+  const expiryMap = useMemo(() => {
+    const map: Record<number, { earliestExpiry: string; daysUntilExpiry: number } | null> = {}
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
+
+    for (const p of purchases ?? []) {
+      if (!p.expiry_date) continue
+      // Guard against invalid date strings
+      const d = new Date(p.expiry_date)
+      if (isNaN(d.getTime())) continue
+
+      const existing = map[p.product_id]
+      if (!existing || d.getTime() < new Date(existing.earliestExpiry).getTime()) {
+        const diffMs = d.getTime() - today.getTime()
+        const diffDays = Math.ceil(diffMs / (1000 * 60 * 60 * 24))
+        map[p.product_id] = {
+          earliestExpiry: p.expiry_date,
+          daysUntilExpiry: diffDays,
+        }
+      }
+    }
+    return map
+  }, [purchases])
 
   const totals = useMemo(() => {
     return (inventory ?? []).reduce(
@@ -158,6 +189,7 @@ export function Inventory() {
                     <TableHead className="text-right">Closing (Pcs)</TableHead>
                     <TableHead className="text-right">Closing (Bags)</TableHead>
                     <TableHead className="text-right">Stock Value</TableHead>
+                    <TableHead>Near Expiry</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -199,6 +231,49 @@ export function Inventory() {
                           {formatNumber(r.closing_bags, 0)} {r.product.outer_unit}
                         </TableCell>
                         <TableCell className="text-right text-xs">{formatINR(r.bag_value)}</TableCell>
+                        <TableCell className="text-xs">
+                          {(() => {
+                            const exp = r.product.id ? expiryMap[r.product.id] : null
+                            if (!exp) return <span className="text-muted-foreground">—</span>
+                            const { earliestExpiry, daysUntilExpiry } = exp
+                            if (daysUntilExpiry < 0) {
+                              return (
+                                <span className="inline-flex items-center gap-1 rounded-full bg-red-100 px-2 py-0.5 text-[10px] font-semibold text-red-700">
+                                  <AlertTriangle className="h-3 w-3" />
+                                  Expired {formatDate(earliestExpiry)}
+                                </span>
+                              )
+                            }
+                            if (daysUntilExpiry <= 7) {
+                              return (
+                                <span className="inline-flex items-center gap-1 rounded-full bg-red-100 px-2 py-0.5 text-[10px] font-semibold text-red-700">
+                                  <Clock className="h-3 w-3" />
+                                  {daysUntilExpiry}d — {formatDate(earliestExpiry)}
+                                </span>
+                              )
+                            }
+                            if (daysUntilExpiry <= 30) {
+                              return (
+                                <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-700">
+                                  <Clock className="h-3 w-3" />
+                                  {daysUntilExpiry}d — {formatDate(earliestExpiry)}
+                                </span>
+                              )
+                            }
+                            if (daysUntilExpiry <= 90) {
+                              return (
+                                <span className="inline-flex items-center gap-1 rounded-full bg-sky-100 px-2 py-0.5 text-[10px] font-semibold text-sky-700">
+                                  {formatDate(earliestExpiry)}
+                                </span>
+                              )
+                            }
+                            return (
+                              <span className="text-muted-foreground">
+                                {formatDate(earliestExpiry)}
+                              </span>
+                            )
+                          })()}
+                        </TableCell>
                       </TableRow>
                     )
                   })}
