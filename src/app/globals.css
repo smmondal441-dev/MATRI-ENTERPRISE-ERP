@@ -225,8 +225,10 @@
      (div, table, tr, td, span, etc.). */
   .print-area,
   #printable-invoice,
+  #printable-dsr,
   .print-area *,
-  #printable-invoice * {
+  #printable-invoice *,
+  #printable-dsr * {
     visibility: visible !important;
     display: block !important;
   }
@@ -234,33 +236,40 @@
   /* But table-related elements need their native display values to render
      correctly as a table — override the `display: block` above. */
   .print-area table,
-  #printable-invoice table {
+  #printable-invoice table,
+  #printable-dsr table {
     display: table !important;
     border-collapse: collapse !important;
     width: 100% !important;
   }
   .print-area thead,
-  #printable-invoice thead {
+  #printable-invoice thead,
+  #printable-dsr thead {
     display: table-header-group !important;
   }
   .print-area tbody,
-  #printable-invoice tbody {
+  #printable-invoice tbody,
+  #printable-dsr tbody {
     display: table-row-group !important;
   }
   .print-area tr,
-  #printable-invoice tr {
+  #printable-invoice tr,
+  #printable-dsr tr {
     display: table-row !important;
   }
   .print-area th,
   .print-area td,
   #printable-invoice th,
-  #printable-invoice td {
+  #printable-invoice td,
+  #printable-dsr th,
+  #printable-dsr td {
     display: table-cell !important;
   }
 
-  /* The printable area itself — compact A5 memo styling */
+  /* The printable area itself — compact A5/A4 memo styling */
   .print-area,
-  #printable-invoice {
+  #printable-invoice,
+  #printable-dsr {
     position: static !important;
     margin: 0 !important;
     padding: 4mm 5mm !important;
@@ -278,8 +287,10 @@
   /* Make all colors solid black for printers without grayscale */
   .print-area *,
   #printable-invoice *,
+  #printable-dsr *,
   .print-area,
-  #printable-invoice {
+  #printable-invoice,
+  #printable-dsr {
     -webkit-print-color-adjust: exact !important;
     print-color-adjust: exact !important;
     color: #000000 !important;
@@ -291,7 +302,9 @@
   .print-area .memo-table th,
   .print-area .memo-table td,
   #printable-invoice .memo-table th,
-  #printable-invoice .memo-table td {
+  #printable-invoice .memo-table td,
+  #printable-dsr .memo-table th,
+  #printable-dsr .memo-table td {
     border: 0.5pt solid #000000 !important;
     padding: 1.5pt 3pt !important;
   }
@@ -299,15 +312,18 @@
   /* Avoid breaking rows across pages */
   .print-area tr,
   #printable-invoice tr,
+  #printable-dsr tr,
   .print-area .memo-row,
-  #printable-invoice .memo-row {
+  #printable-invoice .memo-row,
+  #printable-dsr .memo-row {
     page-break-inside: avoid !important;
     break-inside: avoid !important;
   }
 
   /* Keep the entire memo slip on one page when possible */
   .print-area.memo-slip,
-  #printable-invoice.memo-slip {
+  #printable-invoice.memo-slip,
+  #printable-dsr.memo-slip {
     page-break-inside: avoid !important;
     break-inside: avoid !important;
   }
@@ -335,4 +351,17 @@
     margin: 8mm;
     size: A4 portrait;
   }
+}
+
+/* ----------------------------------------------------------------------------
+ * Upgrade 1 — Collapsible sidebar full-width mode
+ * ----------------------------------------------------------------------------
+ * When the user collapses the sidebar on desktop, the main content area drops
+ * its `max-w-7xl` constraint so modules (Sales, Ledger, Inventory, Reports)
+ * can use the full viewport width — useful for wide tables and dashboards.
+ * ----------------------------------------------------------------------------
+ */
+.main-content-fullwidth {
+  max-width: 100% !important;
+  width: 100%;
 }

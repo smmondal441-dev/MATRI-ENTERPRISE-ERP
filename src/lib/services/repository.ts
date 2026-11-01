@@ -22,7 +22,12 @@ import type {
   PurchaseReturn,
   SalesReturn,
   DamageReason,
+  BillAllocation,
 } from '@/lib/db/dexie'
+
+// Re-export BillAllocation so UI modules can import it from the repository
+// layer without reaching into dexie.ts directly (keeps the hexagonal boundary).
+export type { BillAllocation } from '@/lib/db/dexie'
 
 // ----------------------------------------------------------------------------
 // Helpers — per-piece rate computation (v4 model)
@@ -141,6 +146,29 @@ export function getMarginPercentPerPiece(p: Product): number {
   const sp = getSellingRatePerPiece(p)
   if (sp <= 0) return 0
   return (getProfitPerPiece(p) / sp) * 100
+}
+
+// ----------------------------------------------------------------------------
+// Date normalization helpers (Change 2 — strict ISO-8601 UTC 'Z')
+// ----------------------------------------------------------------------------
+// Business dates (`date`, `mfg_date`, `expiry_date`) are stored as String
+// YYYY-MM-DD in the Prisma schema. We slice any incoming value to its first
+// 10 characters so a stray ISO timestamp (which would shift the calendar day
+// in IST) is clipped back to the plain date.
+//
+// `created_at` / `synced_at` are real DateTime fields and are always stamped
+// via `new Date(...).toISOString()` (UTC 'Z'). The server's push route also
+// enforces this on inbound payloads.
+// ----------------------------------------------------------------------------
+
+function isoBusinessDate(val: any): string {
+  if (val === null || val === undefined || val === '') return ''
+  return String(val).slice(0, 10)
+}
+
+function isoNullableBusinessDate(val: any): string | undefined {
+  if (val === null || val === undefined || val === '') return undefined
+  return String(val).slice(0, 10)
 }
 
 // ----------------------------------------------------------------------------
@@ -369,6 +397,10 @@ export const PurchaseService = {
     const id = await db.transaction('rw', db.purchases, db.products, async () => {
       const purchaseId = await db.purchases.add({
         ...p,
+        // Normalize business dates to YYYY-MM-DD (Change 2)
+        date: isoBusinessDate(p.date),
+        mfg_date: isoNullableBusinessDate(p.mfg_date),
+        expiry_date: isoNullableBusinessDate(p.expiry_date),
         created_at: new Date().toISOString(),
         isSynced: false,
         synced_at: null,
@@ -450,19 +482,27 @@ export const SaleService = {
   async get(id: number): Promise<{ sale: Sale; items: SaleItem[] } | undefined> {
     const sale = await db.sales.get(id)
     if (!sale) return undefined
-    const items = await db.sale_items.where('sale_id').equals(id).toArray()
+    // Dexie's .equals() does strict === against the indexed value (always a
+    // JS number from ++id). Coerce the caller's id to Number so a string
+    // id (from a Turso pull, which stringifies BigInts) doesn't silently
+    // return zero rows.
+    const items = await db.sale_items
+      .where('sale_id')
+      .equals(Number(id))
+      .toArray()
     return { sale, items }
   },
 
   async itemsBySale(saleId: number): Promise<SaleItem[]> {
-    return db.sale_items.where('sale_id').equals(saleId).toArray()
+    return db.sale_items.where('sale_id').equals(Number(saleId)).toArray()
   },
 
   async create(draft: SaleDraft): Promise<number> {
     const saleId = await db.transaction('rw', db.sales, db.sale_items, db.products, async () => {
       const saleId = await db.sales.add({
         invoice_no: draft.invoice_no,
-        date: draft.date,
+        // Normalize business date to YYYY-MM-DD (Change 2)
+        date: isoBusinessDate(draft.date),
         customer_id: draft.customer_id,
         customer_name: draft.customer_name,
         payment_mode: draft.payment_mode,
@@ -504,6 +544,112 @@ export const SaleService = {
     return saleId
   },
 
+  // --------------------------------------------------------------------------
+  // Upgrade 2 — SaleService.update()
+  // --------------------------------------------------------------------------
+  // Replaces a saved sale's header + line items atomically.
+  //
+  // Strategy:
+  //   1. Load the existing sale + items.
+  //   2. RESTORE old stock: re-add every old line item's quantity back to its
+  //      product's opening_stock_pcs (so the new draft starts from a clean
+  //      slate). Mark affected products isSynced=false.
+  //   3. DELETE all old sale_items for this sale.
+  //   4. WRITE the new sale header (in-place update of the existing sale row —
+  //      preserves the original `id` and `created_at`).
+  //   5. INSERT the new sale_items (each marked isSynced=false).
+  //   6. APPLY new stock: decrement every new line item's quantity from the
+  //      corresponding product.
+  //   7. Mark the sale itself isSynced=false so the sync layer re-pushes it.
+  //
+  // Stock math stays consistent because steps 2 and 6 happen inside the same
+  // Dexie transaction — if anything fails, the entire update rolls back.
+  // --------------------------------------------------------------------------
+  async update(id: number, draft: SaleDraft): Promise<number> {
+    await db.transaction(
+      'rw',
+      db.sales,
+      db.sale_items,
+      db.products,
+      async () => {
+        const saleId = Number(id)
+        const existing = await db.sales.get(saleId)
+        if (!existing) {
+          throw new Error(`Sale ${id} not found — cannot edit`)
+        }
+        // ---- Step 2: restore old stock + collect affected product ids ----
+        const oldItems = await db.sale_items
+          .where('sale_id')
+          .equals(saleId)
+          .toArray()
+        const affectedProductIds = new Set<string>()
+        for (const it of oldItems) {
+          const pid = String(it.product_id)
+          affectedProductIds.add(pid)
+          const prod = await db.products.get(it.product_id)
+          if (prod) {
+            await db.products.update(it.product_id, {
+              opening_stock_pcs: prod.opening_stock_pcs + it.quantity_pcs,
+              isSynced: false,
+              synced_at: null,
+            })
+          }
+        }
+        // ---- Step 3: delete old sale_items ----
+        await db.sale_items.where('sale_id').equals(saleId).delete()
+        // ---- Step 4: update sale header in place ----
+        await db.sales.update(saleId, {
+          invoice_no: draft.invoice_no,
+          // Normalize business date to YYYY-MM-DD (Change 2)
+          date: isoBusinessDate(draft.date),
+          customer_id: draft.customer_id,
+          customer_name: draft.customer_name,
+          payment_mode: draft.payment_mode,
+          subtotal: draft.subtotal,
+          cgst: draft.cgst,
+          sgst: draft.sgst,
+          total_amount: draft.total_amount,
+          total_profit: draft.total_profit,
+          total_margin_percent: draft.total_margin_percent,
+          paid_amount:
+            draft.payment_mode === 'Cash' ? draft.total_amount : 0,
+          // Mark as un-synced so SyncService re-pushes the updated sale.
+          isSynced: false,
+          synced_at: null,
+        })
+        // ---- Step 5 + 6: insert new items + apply new stock ----
+        for (const it of draft.items) {
+          affectedProductIds.add(String(it.product_id))
+          await db.sale_items.add({
+            ...it,
+            sale_id: saleId,
+            isSynced: false,
+            synced_at: null,
+          })
+          const prod = await db.products.get(it.product_id)
+          if (prod) {
+            await db.products.update(it.product_id, {
+              opening_stock_pcs: Math.max(
+                0,
+                prod.opening_stock_pcs - it.quantity_pcs
+              ),
+              isSynced: false,
+              synced_at: null,
+            })
+          }
+        }
+        // Note: `affectedProductIds` was tracked so that, in a future
+        // optimization, we could selectively mark only those products as
+        // un-synced (instead of relying on the per-product writes above).
+        // The per-product writes already flip isSynced=false on each touched
+        // product, so this set is currently unused but retained for clarity.
+        void affectedProductIds
+      }
+    )
+    scheduleSync('sales')
+    return id
+  },
+
   async nextInvoiceNo(prefix = 'INV'): Promise<string> {
     const count = await db.sales.count()
     const year = new Date().getFullYear()
@@ -512,7 +658,7 @@ export const SaleService = {
 
   async remove(id: number): Promise<void> {
     await db.transaction('rw', db.sales, db.sale_items, async () => {
-      await db.sale_items.where('sale_id').equals(id).delete()
+      await db.sale_items.where('sale_id').equals(Number(id)).delete()
       await db.sales.delete(id)
     })
     scheduleSync('sales')
@@ -530,12 +676,17 @@ export const CollectionService = {
   },
 
   async byCustomer(customerId: number): Promise<Collection[]> {
-    return db.collections.where('customer_id').equals(customerId).toArray()
+    return db.collections
+      .where('customer_id')
+      .equals(Number(customerId))
+      .toArray()
   },
 
   async create(c: Omit<Collection, 'id' | 'created_at'>): Promise<number> {
     const id = await db.collections.add({
       ...c,
+      // Normalize business date to YYYY-MM-DD (Change 2)
+      date: isoBusinessDate(c.date),
       created_at: new Date().toISOString(),
       isSynced: false,
       synced_at: null,
@@ -553,6 +704,16 @@ export const CollectionService = {
 // Inventory services — derived real-time stock ledger
 // Includes movements from: opening + purchases − sales − damages
 //                                            − purchase_returns + sales_returns(restock)
+//
+// Upgrade 4 — adds:
+//   - latest_mfg_date      : most recent MFG date from purchases (active batch)
+//   - earliest_expiry_date : FEFO nearest expiry from purchases
+//   - days_until_expiry   : signed days from today to earliest_expiry_date
+//   - godown_damaged_pcs  : sum of damages with damage_source = 'godown'
+//                           (these were already deducted from sellable stock)
+//   - store_damaged_pcs   : sum of damages with damage_source = 'store'
+//                           (separate "Damaged Stock (Store)" bucket — never
+//                            touched sellable stock; tracked for accounting)
 // ----------------------------------------------------------------------------
 
 export interface InventoryRow {
@@ -560,12 +721,37 @@ export interface InventoryRow {
   opening_stock_pcs: number
   purchased_pcs: number
   sold_pcs: number
-  damaged_pcs: number
+  damaged_pcs: number // legacy: total of all damages (godown + store)
   purchase_returned_pcs: number
   sales_returned_pcs: number // only restock=true entries
   closing_pcs: number
   closing_bags: number
   bag_value: number
+  // Upgrade 4 fields:
+  latest_mfg_date?: string // YYYY-MM-DD of the most recent purchase with mfg_date
+  earliest_expiry_date?: string // YYYY-MM-DD of the nearest expiry across purchases
+  days_until_expiry?: number // signed: negative = already expired
+  godown_damaged_pcs: number // damages that DID deduct sellable stock
+  store_damaged_pcs: number // damages tracked separately (Store / Market return)
+}
+
+// Helper — parse a YYYY-MM-DD string into a Date at local midnight for
+// day-accurate diff math. Returns null on invalid input.
+function parseDateSafe(val: string | undefined | null): Date | null {
+  if (!val) return null
+  const d = new Date(val)
+  if (isNaN(d.getTime())) return null
+  // Normalize to local-midnight to avoid TZ drift in day-counting.
+  d.setHours(0, 0, 0, 0)
+  return d
+}
+
+// Helper — signed days from `today` to `target` (negative = past, positive = future).
+function daysUntil(target: Date): number {
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+  const diffMs = target.getTime() - today.getTime()
+  return Math.ceil(diffMs / (1000 * 60 * 60 * 24))
 }
 
 export const InventoryService = {
@@ -578,29 +764,58 @@ export const InventoryService = {
     const salesReturns = await db.sales_returns.toArray()
 
     return products.map((p) => {
-      const purchased = purchases
-        .filter((pu) => pu.product_id === p.id)
-        .reduce((s, pu) => s + pu.total_pcs, 0)
+      const pid = String(p.id)
+      // ---- Per-product purchases (used for stock math + FEFO computation) ----
+      const productPurchases = purchases.filter(
+        (pu) => String(pu.product_id) === pid
+      )
+      const purchased = productPurchases.reduce(
+        (s, pu) => s + pu.total_pcs,
+        0
+      )
       const sold = saleItems
-        .filter((si) => si.product_id === p.id)
+        .filter((si) => String(si.product_id) === pid)
         .reduce((s, si) => s + si.quantity_pcs, 0)
-      const damaged = damages
-        .filter((d) => d.product_id === p.id)
-        .reduce((s, d) => s + d.total_pcs, 0)
+
+      // ---- Upgrade 3-aware damage split ----
+      const productDamages = damages.filter(
+        (d) => String(d.product_id) === pid
+      )
+      // Legacy rows (damage_source === undefined) are treated as 'godown'.
+      const godownDamages = productDamages.filter(
+        (d) => d.damage_source !== 'store'
+      )
+      const storeDamages = productDamages.filter(
+        (d) => d.damage_source === 'store'
+      )
+      const godownDamagedPcs = godownDamages.reduce(
+        (s, d) => s + d.total_pcs,
+        0
+      )
+      const storeDamagedPcs = storeDamages.reduce(
+        (s, d) => s + d.total_pcs,
+        0
+      )
+      // Legacy `damaged_pcs` = total (godown + store) — kept for the existing
+      // CSV export column and any external code that reads it.
+      const damaged = godownDamagedPcs + storeDamagedPcs
+
       const purchaseReturned = purchaseReturns
-        .filter((pr) => pr.product_id === p.id)
+        .filter((pr) => String(pr.product_id) === pid)
         .reduce((s, pr) => s + pr.total_pcs, 0)
       const salesReturned = salesReturns
-        .filter((sr) => sr.product_id === p.id && sr.restock)
+        .filter((sr) => String(sr.product_id) === pid && sr.restock)
         .reduce((s, sr) => s + sr.total_pcs, 0)
 
       // opening_stock_pcs is mutated as purchases/sales/damages/returns happen.
       // Reconstruct the original opening by reversing every mutation.
+      // NOTE: store damages were never deducted from sellable stock, so they
+      // are NOT reversed here. Only godown damages were.
       const originalOpening =
         p.opening_stock_pcs -
         purchased +
         sold +
-        damaged +
+        godownDamagedPcs + // only godown damages were deducted
         purchaseReturned -
         salesReturned
 
@@ -614,17 +829,52 @@ export const InventoryService = {
         ? (closing / p.conversion_factor) * perOuterPurchaseRate
         : closing * perPiecePurchaseRate
 
+      // ---- Upgrade 4 — FEFO / shelf-life computation ----
+      // Walk every purchase entry that has a mfg_date / expiry_date and pick:
+      //   - latest_mfg_date  = max(mfg_date)        → "active batch"
+      //   - earliest_expiry  = min(expiry_date)     → FEFO nearest expiry
+      let latestMfg: Date | null = null
+      let earliestExpiry: Date | null = null
+      for (const pu of productPurchases) {
+        const mfg = parseDateSafe(pu.mfg_date)
+        if (mfg && (latestMfg === null || mfg.getTime() > latestMfg.getTime())) {
+          latestMfg = mfg
+        }
+        const exp = parseDateSafe(pu.expiry_date)
+        if (
+          exp &&
+          (earliestExpiry === null || exp.getTime() < earliestExpiry.getTime())
+        ) {
+          earliestExpiry = exp
+        }
+      }
+      const latestMfgStr = latestMfg
+        ? latestMfg.toISOString().slice(0, 10)
+        : undefined
+      const earliestExpiryStr = earliestExpiry
+        ? earliestExpiry.toISOString().slice(0, 10)
+        : undefined
+      const daysUntilExpiry = earliestExpiry
+        ? daysUntil(earliestExpiry)
+        : undefined
+
       return {
         product: p,
         opening_stock_pcs: originalOpening,
         purchased_pcs: purchased,
         sold_pcs: sold,
-        damaged_pcs: damaged,
+        damaged_pcs: damaged, // legacy: godown + store
         purchase_returned_pcs: purchaseReturned,
         sales_returned_pcs: salesReturned,
         closing_pcs: closing,
         closing_bags: closingBags,
         bag_value: bagValue,
+        // Upgrade 4 fields:
+        latest_mfg_date: latestMfgStr,
+        earliest_expiry_date: earliestExpiryStr,
+        days_until_expiry: daysUntilExpiry,
+        godown_damaged_pcs: godownDamagedPcs,
+        store_damaged_pcs: storeDamagedPcs,
       }
     })
   },
@@ -650,15 +900,18 @@ export const DuesService = {
     const collections = await db.collections.toArray()
     const salesReturns = await db.sales_returns.toArray()
     return customers.map((c) => {
+      const cid = String(c.id)
       const creditSales = sales
-        .filter((s) => s.customer_id === c.id && s.payment_mode === 'Credit')
+        .filter(
+          (s) => String(s.customer_id) === cid && s.payment_mode === 'Credit'
+        )
         .reduce((sum, s) => sum + s.total_amount, 0)
       const coll = collections
-        .filter((col) => col.customer_id === c.id)
+        .filter((col) => String(col.customer_id) === cid)
         .reduce((sum, col) => sum + col.amount, 0)
       // Sales returns credit the customer's outstanding dues
       const returns = salesReturns
-        .filter((sr) => sr.customer_id === c.id)
+        .filter((sr) => String(sr.customer_id) === cid)
         .reduce((sum, sr) => sum + sr.total_amount, 0)
       return {
         customer: c,
@@ -673,7 +926,116 @@ export const DuesService = {
 
   async byCustomer(customerId: number): Promise<CustomerDues | undefined> {
     const all = await this.all()
-    return all.find((d) => d.customer.id === customerId)
+    return all.find(
+      (d) => String(d.customer.id) === String(customerId)
+    )
+  },
+}
+
+// ----------------------------------------------------------------------------
+// Bill Dues — invoice-wise breakdown of outstanding credit sales
+// ----------------------------------------------------------------------------
+// Powers the Tally-style "Against Reference" allocation UI in Collections.tsx.
+// For each credit sale of the customer, computes:
+//   - total_amount   = sale.total_amount (grand total incl. GST)
+//   - paid_amount   = sum of bill_allocations[].amount across ALL collections
+//                     for this customer where allocation.sale_id === sale.id
+//   - remaining_due = total_amount - paid_amount
+//
+// Only credit sales are returned (cash sales are paid in full at POS).
+// Sales with remaining_due <= 0 are filtered out so the UI only shows
+// genuinely outstanding bills. The caller can choose to include fully-paid
+// bills (e.g. for history) by passing includePaid = true.
+//
+// If a sale was edited and its invoice_no changed, the live sale's invoice_no
+// is used (the snapshot on each BillAllocation is just a fallback for when
+// the sale was deleted).
+// ----------------------------------------------------------------------------
+
+export interface BillDue {
+  sale: Sale
+  invoice_no: string // live from sale.invoice_no (or allocation snapshot if sale deleted)
+  total_amount: number
+  paid_amount: number // sum of allocations across all collections
+  remaining_due: number
+}
+
+export const BillDuesService = {
+  /**
+   * Returns the per-bill outstanding breakdown for a single customer.
+   * Only credit sales are included. Fully-paid bills are excluded unless
+   * `includePaid` is true.
+   */
+  async byCustomer(
+    customerId: number,
+    includePaid = false
+  ): Promise<BillDue[]> {
+    const cid = String(customerId)
+    const sales = await db.sales.toArray()
+    const collections = await db.collections.toArray()
+
+    // ---- Credit sales for this customer ----
+    const creditSales = sales.filter(
+      (s) =>
+        String(s.customer_id) === cid && s.payment_mode === 'Credit'
+    )
+
+    // ---- All collections for this customer (we'll walk their allocations) ----
+    const custCollections = collections.filter(
+      (c) => String(c.customer_id) === cid
+    )
+
+    // ---- Build sale-id → paid-amount map by walking allocations ----
+    // Multiple collections may allocate to the same sale; we sum them all.
+    const paidMap = new Map<string, number>()
+    for (const col of custCollections) {
+      const allocations = col.bill_allocations ?? []
+      for (const alloc of allocations) {
+        const sid = String(alloc.sale_id)
+        paidMap.set(sid, (paidMap.get(sid) ?? 0) + (alloc.amount ?? 0))
+      }
+    }
+
+    // ---- Build the BillDue rows ----
+    const rows: BillDue[] = creditSales.map((sale) => {
+      const sid = String(sale.id)
+      const paid = paidMap.get(sid) ?? 0
+      const remaining = sale.total_amount - paid
+      return {
+        sale,
+        invoice_no: sale.invoice_no,
+        total_amount: sale.total_amount,
+        paid_amount: paid,
+        remaining_due: remaining,
+      }
+    })
+
+    // ---- Filter out fully-paid bills unless includePaid ----
+    return includePaid
+      ? rows
+      : rows.filter((r) => r.remaining_due > 0.001) // tiny epsilon for float drift
+  },
+
+  /**
+   * Returns ALL customers' bill dues (for reports / aging analysis).
+   * Grouped by customer for easy iteration.
+   */
+  async all(): Promise<
+    { customer: Customer; bills: BillDue[]; totalRemaining: number }[]
+  > {
+    const customers = await db.customers.toArray()
+    const out: { customer: Customer; bills: BillDue[]; totalRemaining: number }[] =
+      []
+    for (const c of customers) {
+      const bills = await this.byCustomer(c.id!, false)
+      if (bills.length === 0) continue
+      const totalRemaining = bills.reduce(
+        (s, b) => s + b.remaining_due,
+        0
+      )
+      out.push({ customer: c, bills, totalRemaining })
+    }
+    return out
   },
 }
 
@@ -712,6 +1074,11 @@ export const SettingsService = {
 // Damage / Stock-Adjustment services
 // Records damaged/expired/leaked goods; deducts stock atomically and stores
 // the cost value as an expense for P&L reporting.
+//
+// Upgrade 3 — Damage Source:
+//   - damage_source = 'godown' (default) → deducts from sellable godown stock
+//   - damage_source = 'store'  → does NOT touch sellable stock; tracked
+//                                separately as "Damaged Stock (Store)".
 // ----------------------------------------------------------------------------
 
 export const DamageService = {
@@ -726,15 +1093,28 @@ export const DamageService = {
       // per-piece purchase rate (falls back to derived rate for legacy rows)
       const perPiece = prod ? getPurchaseRatePerPiece(prod) : 0
       const expenseValue = perPiece * d.total_pcs
+      // Upgrade 3 — resolve the damage source. Defaults to 'godown' for
+      // backward compatibility (undefined / missing field on legacy callers).
+      const source: 'godown' | 'store' =
+        d.damage_source === 'store' ? 'store' : 'godown'
       const damageId = await db.damages.add({
         ...d,
+        // Normalize business date to YYYY-MM-DD (Change 2)
+        date: isoBusinessDate(d.date),
+        // Persist the resolved source (never undefined) so sync round-trips
+        // are deterministic and Inventory can group by source.
+        damage_source: source,
+        // customer_id / customer_name only meaningful when source = 'store'
+        customer_id: source === 'store' ? d.customer_id : undefined,
+        customer_name: source === 'store' ? d.customer_name : undefined,
         expense_value: expenseValue,
         created_at: new Date().toISOString(),
         isSynced: false,
         synced_at: null,
       })
-      // Decrement product stock + mark un-synced
-      if (prod) {
+      // Upgrade 3 — only decrement sellable godown stock when source = 'godown'.
+      // Store damages are tracked separately and do NOT reduce good inventory.
+      if (prod && source === 'godown') {
         await db.products.update(d.product_id, {
           opening_stock_pcs: Math.max(0, prod.opening_stock_pcs - d.total_pcs),
           isSynced: false,
@@ -751,13 +1131,19 @@ export const DamageService = {
     const damage = await db.damages.get(id)
     if (!damage) return
     await db.transaction('rw', db.damages, db.products, async () => {
-      const prod = await db.products.get(damage.product_id)
-      if (prod) {
-        await db.products.update(damage.product_id, {
-          opening_stock_pcs: prod.opening_stock_pcs + damage.total_pcs,
-          isSynced: false,
-          synced_at: null,
-        })
+      // Upgrade 3 — only restore godown stock if the original damage had
+      // actually deducted it (i.e. damage_source === 'godown'). Legacy rows
+      // with `damage_source === undefined` are treated as 'godown' too.
+      const wasGodown = damage.damage_source !== 'store'
+      if (wasGodown) {
+        const prod = await db.products.get(damage.product_id)
+        if (prod) {
+          await db.products.update(damage.product_id, {
+            opening_stock_pcs: prod.opening_stock_pcs + damage.total_pcs,
+            isSynced: false,
+            synced_at: null,
+          })
+        }
       }
       await db.damages.delete(id)
     })
@@ -796,6 +1182,8 @@ export const PurchaseReturnService = {
       const returnNo = await this.nextReturnNo()
       const returnId = await db.purchase_returns.add({
         ...r,
+        // Normalize business date to YYYY-MM-DD (Change 2)
+        date: isoBusinessDate(r.date),
         return_no: returnNo,
         created_at: new Date().toISOString(),
         isSynced: false,
@@ -856,6 +1244,8 @@ export const SalesReturnService = {
       const returnNo = await this.nextReturnNo()
       const returnId = await db.sales_returns.add({
         ...r,
+        // Normalize business date to YYYY-MM-DD (Change 2)
+        date: isoBusinessDate(r.date),
         return_no: returnNo,
         created_at: new Date().toISOString(),
         isSynced: false,

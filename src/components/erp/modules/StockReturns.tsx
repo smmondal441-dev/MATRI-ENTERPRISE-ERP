@@ -24,17 +24,11 @@ import {
   downloadCSV,
 } from '@/lib/utils/format'
 import { PageHeader, EmptyState } from '@/components/erp/EmptyState'
+import { Combobox } from '@/components/erp/Combobox'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import {
   Table,
   TableBody,
@@ -60,6 +54,7 @@ import {
   PackageX,
   PackageCheck,
 } from 'lucide-react'
+import type { Product, Customer } from '@/lib/db/dexie'
 
 export function StockReturns() {
   return (
@@ -227,16 +222,45 @@ function PurchaseReturnTab() {
               <Input value={supplierGstin} onChange={(e) => setSupplierGstin(e.target.value)} className="font-mono text-xs" />
             </Field>
             <Field label="Product *">
-              <Select value={productId} onValueChange={setProductId}>
-                <SelectTrigger><SelectValue placeholder="Select product" /></SelectTrigger>
-                <SelectContent>
-                  {(products ?? []).map((p) => (
-                    <SelectItem key={p.id} value={String(p.id)}>
-                      {p.sku} · {p.name} (Stock: {formatNumber(p.opening_stock_pcs, 0)} Pcs)
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <Combobox<Product>
+                items={products ?? []}
+                value={productId}
+                onValueChange={setProductId}
+                getItemValue={(p) => String(p.id)}
+                getItemLabel={(p) =>
+                  `${p.sku} · ${p.name} (Stock: ${formatNumber(p.opening_stock_pcs, 0)} Pcs)`
+                }
+                filterFn={(p, q) =>
+                  p.name.toLowerCase().includes(q) ||
+                  p.sku.toLowerCase().includes(q) ||
+                  p.company_name.toLowerCase().includes(q) ||
+                  p.hsn_code.toLowerCase().includes(q)
+                }
+                placeholder="Search & select product to return to supplier..."
+                searchPlaceholder="Search by name / SKU / company / HSN..."
+                emptyText="No product matches your search."
+                renderItem={(p) => (
+                  <div className="flex w-full items-center justify-between gap-2 leading-tight">
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate font-medium">{p.name}</div>
+                      <div className="text-[11px] text-muted-foreground">
+                        {p.sku} · {p.company_name}
+                      </div>
+                    </div>
+                    <div className="shrink-0 text-right text-[11px]">
+                      <span
+                        className={
+                          p.opening_stock_pcs > 0
+                            ? 'font-semibold text-emerald-700'
+                            : 'font-semibold text-red-600'
+                        }
+                      >
+                        Stock: {formatNumber(p.opening_stock_pcs, 0)} {p.base_unit}
+                      </span>
+                    </div>
+                  </div>
+                )}
+              />
             </Field>
           </div>
 
@@ -478,28 +502,66 @@ function SalesReturnTab() {
               <Input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
             </Field>
             <Field label="Customer *">
-              <Select value={customerId} onValueChange={setCustomerId}>
-                <SelectTrigger><SelectValue placeholder="Select customer" /></SelectTrigger>
-                <SelectContent>
-                  {(customers ?? []).map((c) => (
-                    <SelectItem key={c.id} value={String(c.id)}>
-                      {c.customer_id} · {c.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <Combobox<Customer>
+                items={customers ?? []}
+                value={customerId}
+                onValueChange={setCustomerId}
+                getItemValue={(c) => String(c.id)}
+                getItemLabel={(c) => `${c.customer_id} · ${c.name}`}
+                filterFn={(c, q) =>
+                  c.name.toLowerCase().includes(q) ||
+                  c.customer_id.toLowerCase().includes(q) ||
+                  c.route_area.toLowerCase().includes(q) ||
+                  (c.phone || '').toLowerCase().includes(q)
+                }
+                placeholder="Search customer by name / code / route / phone..."
+                searchPlaceholder="Search customer..."
+                emptyText="No customer matches your search."
+                renderItem={(c) => (
+                  <div className="flex flex-col leading-tight">
+                    <span className="font-medium">{c.name}</span>
+                    <span className="text-[11px] text-muted-foreground">
+                      {c.customer_id} · {c.route_area}
+                      {c.phone ? ` · ${c.phone}` : ''}
+                    </span>
+                  </div>
+                )}
+              />
             </Field>
             <Field label="Product *" className="sm:col-span-2">
-              <Select value={productId} onValueChange={setProductId}>
-                <SelectTrigger><SelectValue placeholder="Select returned product" /></SelectTrigger>
-                <SelectContent>
-                  {(products ?? []).map((p) => (
-                    <SelectItem key={p.id} value={String(p.id)}>
-                      {p.sku} · {p.name} — Sell {formatINR(getSellingRatePerPiece(p))}/Pcs
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <Combobox<Product>
+                items={products ?? []}
+                value={productId}
+                onValueChange={setProductId}
+                getItemValue={(p) => String(p.id)}
+                getItemLabel={(p) =>
+                  `${p.sku} · ${p.name} — Sell ${formatINR(getSellingRatePerPiece(p))}/Pcs`
+                }
+                filterFn={(p, q) =>
+                  p.name.toLowerCase().includes(q) ||
+                  p.sku.toLowerCase().includes(q) ||
+                  p.company_name.toLowerCase().includes(q) ||
+                  p.hsn_code.toLowerCase().includes(q)
+                }
+                placeholder="Search & select returned product..."
+                searchPlaceholder="Search by name / SKU / company / HSN..."
+                emptyText="No product matches your search."
+                renderItem={(p) => (
+                  <div className="flex w-full items-center justify-between gap-2 leading-tight">
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate font-medium">{p.name}</div>
+                      <div className="text-[11px] text-muted-foreground">
+                        {p.sku} · {p.company_name}
+                      </div>
+                    </div>
+                    <div className="shrink-0 text-right text-[11px]">
+                      <div className="font-semibold text-emerald-700">
+                        Sell {formatINR(getSellingRatePerPiece(p))}/{p.base_unit}
+                      </div>
+                    </div>
+                  </div>
+                )}
+              />
             </Field>
           </div>
 

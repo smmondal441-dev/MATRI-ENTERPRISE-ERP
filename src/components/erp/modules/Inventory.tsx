@@ -7,6 +7,7 @@ import {
   formatNumber,
   downloadCSV,
   todayISO,
+  formatDate,
 } from '@/lib/utils/format'
 import { PageHeader, EmptyState } from '@/components/erp/EmptyState'
 import { Card, CardContent } from '@/components/ui/card'
@@ -20,18 +21,43 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { useToast } from '@/hooks/use-toast'
-import { Warehouse, Search, Download, AlertTriangle, Clock } from 'lucide-react'
-import { usePurchases } from '@/lib/hooks/use-erp'
-import { formatDate } from '@/lib/utils/format'
+import {
+  Warehouse,
+  Search,
+  Download,
+  AlertTriangle,
+  Clock,
+  Skull,
+} from 'lucide-react'
+
+// ----------------------------------------------------------------------------
+// Upgrade 4 — Inventory with FEFO + Damaged Stock bucket
+// ----------------------------------------------------------------------------
+// Inventory rows now carry `latest_mfg_date`, `earliest_expiry_date`,
+// `days_until_expiry`, `godown_damaged_pcs`, and `store_damaged_pcs` directly
+// (computed once per refresh in InventoryService.all()). The Inventory UI just
+// renders those fields — no more client-side `purchases` join needed.
+//
+// Tabs:
+//   - All              : every SKU (default)
+//   - Near Expiry ≤30d : rows with 0 ≤ days_until_expiry ≤ 30
+//   - Expired          : rows with days_until_expiry < 0
+//   - Damaged Stock    : rows where store_damaged_pcs > 0 (separate bucket —
+//                        store-returned damaged goods that did NOT touch
+//                        sellable godown stock)
+// ----------------------------------------------------------------------------
+
+type InvTab = 'all' | 'near-expiry' | 'expired' | 'damaged-stock'
 
 export function Inventory() {
   const inventory = useInventory()
-  const purchases = usePurchases()
   const { toast } = useToast()
   const [search, setSearch] = useState('')
+  const [tab, setTab] = useState<InvTab>('all')
 
-  const filtered = useMemo(() => {
+  const searched = useMemo(() => {
     const q = search.trim().toLowerCase()
     if (!q) return inventory ?? []
     return (inventory ?? []).filter(
@@ -43,33 +69,27 @@ export function Inventory() {
     )
   }, [inventory, search])
 
-  // ---- Near-Expiry Computation (Phase 1 — Conservative) ----
-  // For each product, find the EARLIEST expiry_date across all purchase entries.
-  // This gives a conservative alert: "at least some stock of this product
-  // expires by [earliest date]." Stock math is 100% untouched.
-  const expiryMap = useMemo(() => {
-    const map: Record<number, { earliestExpiry: string; daysUntilExpiry: number } | null> = {}
-    const today = new Date()
-    today.setHours(0, 0, 0, 0)
-
-    for (const p of purchases ?? []) {
-      if (!p.expiry_date) continue
-      // Guard against invalid date strings
-      const d = new Date(p.expiry_date)
-      if (isNaN(d.getTime())) continue
-
-      const existing = map[p.product_id]
-      if (!existing || d.getTime() < new Date(existing.earliestExpiry).getTime()) {
-        const diffMs = d.getTime() - today.getTime()
-        const diffDays = Math.ceil(diffMs / (1000 * 60 * 60 * 24))
-        map[p.product_id] = {
-          earliestExpiry: p.expiry_date,
-          daysUntilExpiry: diffDays,
-        }
-      }
+  const filtered = useMemo(() => {
+    switch (tab) {
+      case 'near-expiry':
+        return searched.filter(
+          (r) =>
+            r.days_until_expiry != null &&
+            r.days_until_expiry >= 0 &&
+            r.days_until_expiry <= 30
+        )
+      case 'expired':
+        return searched.filter(
+          (r) => r.days_until_expiry != null && r.days_until_expiry < 0
+        )
+      case 'damaged-stock':
+        // Rows with any Store-damage bucket stock tracked separately
+        return searched.filter((r) => r.store_damaged_pcs > 0)
+      case 'all':
+      default:
+        return searched
     }
-    return map
-  }, [purchases])
+  }, [searched, tab])
 
   const totals = useMemo(() => {
     return (inventory ?? []).reduce(
@@ -78,9 +98,26 @@ export function Inventory() {
         acc.closingBags += row.closing_bags
         acc.value += row.bag_value
         acc.lowStock += row.closing_pcs <= 10 ? 1 : 0
+        acc.nearExpiry +=
+          row.days_until_expiry != null &&
+          row.days_until_expiry >= 0 &&
+          row.days_until_expiry <= 30
+            ? 1
+            : 0
+        acc.expired +=
+          row.days_until_expiry != null && row.days_until_expiry < 0 ? 1 : 0
+        acc.storeDamagedPcs += row.store_damaged_pcs
         return acc
       },
-      { closingPcs: 0, closingBags: 0, value: 0, lowStock: 0 }
+      {
+        closingPcs: 0,
+        closingBags: 0,
+        value: 0,
+        lowStock: 0,
+        nearExpiry: 0,
+        expired: 0,
+        storeDamagedPcs: 0,
+      }
     )
   }, [inventory])
 
@@ -94,10 +131,14 @@ export function Inventory() {
         'Pack Size',
         'Outer Unit',
         'Conversion',
+        'Latest MFG',
+        'Earliest Expiry',
+        'Days Until Expiry',
         'Opening Stock (Pcs)',
         'Purchased (Pcs)',
         'Sold (Pcs)',
-        'Damaged (Pcs)',
+        'Damaged Godown (Pcs)',
+        'Damaged Store (Pcs)',
         'Purchase Returned (Pcs)',
         'Sales Returned (Pcs)',
         'Closing (Pcs)',
@@ -112,10 +153,14 @@ export function Inventory() {
         r.product.pack_size || '',
         r.product.outer_unit,
         r.product.conversion_factor,
+        r.latest_mfg_date || '',
+        r.earliest_expiry_date || '',
+        r.days_until_expiry != null ? r.days_until_expiry : '',
         r.opening_stock_pcs,
         r.purchased_pcs,
         r.sold_pcs,
-        r.damaged_pcs,
+        r.godown_damaged_pcs,
+        r.store_damaged_pcs,
         r.purchase_returned_pcs,
         r.sales_returned_pcs,
         r.closing_pcs,
@@ -131,7 +176,7 @@ export function Inventory() {
     <div className="space-y-4">
       <PageHeader
         title="Inventory · Real-time Stock Ledger"
-        description="Live stock position reconstructed from opening + purchases − sales."
+        description="Live stock position reconstructed from opening + purchases − sales − damages, with FEFO shelf-life tracking."
         actions={
           <Button variant="outline" onClick={exportCsv}>
             <Download className="mr-1 h-4 w-4" /> Export CSV
@@ -139,12 +184,37 @@ export function Inventory() {
         }
       />
 
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4 xl:grid-cols-6">
         <StatCard label="Total SKUs" value={String(inventory?.length ?? 0)} />
         <StatCard label="Closing Pcs" value={formatNumber(totals.closingPcs, 0)} variant="info" />
         <StatCard label="Closing Bags" value={formatNumber(totals.closingBags, 0)} variant="success" />
         <StatCard label="Stock Value" value={formatINR(totals.value)} />
+        {/* Upgrade 4 — Near-Expiry + Expired stat cards */}
+        <StatCard
+          label="Near Expiry ≤30d"
+          value={String(totals.nearExpiry)}
+          variant={totals.nearExpiry > 0 ? 'warning' : 'default'}
+        />
+        <StatCard
+          label="Expired SKUs"
+          value={String(totals.expired)}
+          variant={totals.expired > 0 ? 'danger' : 'default'}
+        />
       </div>
+
+      {/* Upgrade 4 — separate Damaged Stock (Store) bucket summary */}
+      {totals.storeDamagedPcs > 0 && (
+        <div className="flex items-center gap-2 rounded-md border border-blue-200 bg-blue-50 px-4 py-2 text-sm text-blue-800">
+          <Skull className="h-4 w-4" />
+          <span>
+            <strong>Damaged Stock (Store):</strong>{' '}
+            {formatNumber(totals.storeDamagedPcs, 0)} Pcs across{' '}
+            {(inventory ?? []).filter((r) => r.store_damaged_pcs > 0).length}{' '}
+            SKU(s). These are store-returned damaged goods tracked separately —
+            sellable godown stock is NOT affected.
+          </span>
+        </div>
+      )}
 
       {totals.lowStock > 0 && (
         <div className="flex items-center gap-2 rounded-md border border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-800">
@@ -155,6 +225,26 @@ export function Inventory() {
 
       <Card>
         <CardContent className="p-4">
+          {/* ---- Filter tabs (Upgrade 4) ---- */}
+          <Tabs
+            value={tab}
+            onValueChange={(v) => setTab(v as InvTab)}
+            className="mb-3"
+          >
+            <TabsList>
+              <TabsTrigger value="all">All ({inventory?.length ?? 0})</TabsTrigger>
+              <TabsTrigger value="near-expiry">
+                Near Expiry ≤30d ({totals.nearExpiry})
+              </TabsTrigger>
+              <TabsTrigger value="expired">
+                Expired ({totals.expired})
+              </TabsTrigger>
+              <TabsTrigger value="damaged-stock">
+                Damaged Stock ({(inventory ?? []).filter((r) => r.store_damaged_pcs > 0).length})
+              </TabsTrigger>
+            </TabsList>
+          </Tabs>
+
           <div className="relative mb-3 max-w-md">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <Input
@@ -167,8 +257,12 @@ export function Inventory() {
 
           {filtered.length === 0 ? (
             <EmptyState
-              title="No inventory"
-              description="Add products and record purchases to see stock here."
+              title="No inventory matches"
+              description={
+                tab === 'all'
+                  ? 'Add products and record purchases to see stock here.'
+                  : `No SKUs match the "${tab}" filter.`
+              }
               icon={<Warehouse className="h-6 w-6" />}
             />
           ) : (
@@ -183,13 +277,17 @@ export function Inventory() {
                     <TableHead className="text-right">Opening (Pcs)</TableHead>
                     <TableHead className="text-right">Purchased (Pcs)</TableHead>
                     <TableHead className="text-right">Sold (Pcs)</TableHead>
-                    <TableHead className="text-right">Damaged (Pcs)</TableHead>
-                    <TableHead className="text-right">Pur. Returned (Pcs)</TableHead>
-                    <TableHead className="text-right">Sales Returned (Pcs)</TableHead>
+                    {/* Upgrade 4 — split damages into Godown (deducted) and Store (separate bucket) */}
+                    <TableHead className="text-right">Dmg Godown (Pcs)</TableHead>
+                    <TableHead className="text-right">Dmg Store (Pcs)</TableHead>
+                    <TableHead className="text-right">Pur. Ret. (Pcs)</TableHead>
+                    <TableHead className="text-right">Sales Ret. (Pcs)</TableHead>
                     <TableHead className="text-right">Closing (Pcs)</TableHead>
                     <TableHead className="text-right">Closing (Bags)</TableHead>
                     <TableHead className="text-right">Stock Value</TableHead>
-                    <TableHead>Near Expiry</TableHead>
+                    {/* Upgrade 4 — MFG + Expiry columns */}
+                    <TableHead>MFG Date</TableHead>
+                    <TableHead>Expiry (FEFO)</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -215,8 +313,17 @@ export function Inventory() {
                         <TableCell className="text-right text-xs text-red-600">
                           -{formatNumber(r.sold_pcs, 0)}
                         </TableCell>
+                        {/* Godown damages (deducted from sellable stock) */}
                         <TableCell className="text-right text-xs text-amber-600">
-                          -{formatNumber(r.damaged_pcs, 0)}
+                          {r.godown_damaged_pcs > 0
+                            ? `-${formatNumber(r.godown_damaged_pcs, 0)}`
+                            : '—'}
+                        </TableCell>
+                        {/* Store damages (separate bucket — sellable stock unchanged) */}
+                        <TableCell className="text-right text-xs text-blue-700">
+                          {r.store_damaged_pcs > 0
+                            ? `+${formatNumber(r.store_damaged_pcs, 0)}`
+                            : '—'}
                         </TableCell>
                         <TableCell className="text-right text-xs text-rose-600">
                           -{formatNumber(r.purchase_returned_pcs, 0)}
@@ -231,48 +338,22 @@ export function Inventory() {
                           {formatNumber(r.closing_bags, 0)} {r.product.outer_unit}
                         </TableCell>
                         <TableCell className="text-right text-xs">{formatINR(r.bag_value)}</TableCell>
+                        {/* Upgrade 4 — MFG Date column */}
                         <TableCell className="text-xs">
-                          {(() => {
-                            const exp = r.product.id ? expiryMap[r.product.id] : null
-                            if (!exp) return <span className="text-muted-foreground">—</span>
-                            const { earliestExpiry, daysUntilExpiry } = exp
-                            if (daysUntilExpiry < 0) {
-                              return (
-                                <span className="inline-flex items-center gap-1 rounded-full bg-red-100 px-2 py-0.5 text-[10px] font-semibold text-red-700">
-                                  <AlertTriangle className="h-3 w-3" />
-                                  Expired {formatDate(earliestExpiry)}
-                                </span>
-                              )
-                            }
-                            if (daysUntilExpiry <= 7) {
-                              return (
-                                <span className="inline-flex items-center gap-1 rounded-full bg-red-100 px-2 py-0.5 text-[10px] font-semibold text-red-700">
-                                  <Clock className="h-3 w-3" />
-                                  {daysUntilExpiry}d — {formatDate(earliestExpiry)}
-                                </span>
-                              )
-                            }
-                            if (daysUntilExpiry <= 30) {
-                              return (
-                                <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-700">
-                                  <Clock className="h-3 w-3" />
-                                  {daysUntilExpiry}d — {formatDate(earliestExpiry)}
-                                </span>
-                              )
-                            }
-                            if (daysUntilExpiry <= 90) {
-                              return (
-                                <span className="inline-flex items-center gap-1 rounded-full bg-sky-100 px-2 py-0.5 text-[10px] font-semibold text-sky-700">
-                                  {formatDate(earliestExpiry)}
-                                </span>
-                              )
-                            }
-                            return (
-                              <span className="text-muted-foreground">
-                                {formatDate(earliestExpiry)}
-                              </span>
-                            )
-                          })()}
+                          {r.latest_mfg_date ? (
+                            <span className="text-muted-foreground">
+                              {formatDate(r.latest_mfg_date)}
+                            </span>
+                          ) : (
+                            <span className="text-muted-foreground">—</span>
+                          )}
+                        </TableCell>
+                        {/* Upgrade 4 — Expiry / FEFO column with badge logic */}
+                        <TableCell className="text-xs">
+                          <ExpiryBadge
+                            expiryDate={r.earliest_expiry_date}
+                            daysUntil={r.days_until_expiry}
+                          />
                         </TableCell>
                       </TableRow>
                     )
@@ -287,6 +368,61 @@ export function Inventory() {
   )
 }
 
+// ----------------------------------------------------------------------------
+// Expiry badge — color-coded by remaining days
+//   < 0         → Expired (red, with AlertTriangle)
+//   0 – 7       → Critical (red, with Clock)
+//   8 – 30      → Near Expiry (amber, with Clock)
+//   31 – 90     → Watch (sky)
+//   > 90 / null → plain text or em-dash
+// ----------------------------------------------------------------------------
+
+function ExpiryBadge({
+  expiryDate,
+  daysUntil,
+}: {
+  expiryDate?: string
+  daysUntil?: number
+}) {
+  if (!expiryDate || daysUntil == null) {
+    return <span className="text-muted-foreground">—</span>
+  }
+  if (daysUntil < 0) {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-red-100 px-2 py-0.5 text-[10px] font-semibold text-red-700">
+        <AlertTriangle className="h-3 w-3" />
+        Expired {formatDate(expiryDate)}
+      </span>
+    )
+  }
+  if (daysUntil <= 7) {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-red-100 px-2 py-0.5 text-[10px] font-semibold text-red-700">
+        <Clock className="h-3 w-3" />
+        {daysUntil}d — {formatDate(expiryDate)}
+      </span>
+    )
+  }
+  if (daysUntil <= 30) {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-700">
+        <Clock className="h-3 w-3" />
+        {daysUntil}d — {formatDate(expiryDate)}
+      </span>
+    )
+  }
+  if (daysUntil <= 90) {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-sky-100 px-2 py-0.5 text-[10px] font-semibold text-sky-700">
+        {formatDate(expiryDate)}
+      </span>
+    )
+  }
+  return (
+    <span className="text-muted-foreground">{formatDate(expiryDate)}</span>
+  )
+}
+
 function StatCard({
   label,
   value,
@@ -294,12 +430,14 @@ function StatCard({
 }: {
   label: string
   value: string
-  variant?: 'default' | 'success' | 'info'
+  variant?: 'default' | 'success' | 'info' | 'warning' | 'danger'
 }) {
   const styles = {
     default: 'border-border bg-card',
     success: 'border-emerald-200 bg-emerald-50',
     info: 'border-sky-200 bg-sky-50',
+    warning: 'border-amber-200 bg-amber-50',
+    danger: 'border-red-200 bg-red-50',
   }[variant]
   return (
     <div className={`rounded-md border p-3 ${styles}`}>

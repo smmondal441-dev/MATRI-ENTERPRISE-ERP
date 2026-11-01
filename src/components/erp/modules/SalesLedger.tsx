@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useMemo } from 'react'
-import { useSales } from '@/lib/hooks/use-erp'
+import { useSales, useCustomers } from '@/lib/hooks/use-erp'
 import { SaleService } from '@/lib/services/repository'
 import {
   formatINR,
@@ -37,6 +37,8 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { useToast } from '@/hooks/use-toast'
+import { PrintableDSR } from '@/components/erp/PrintableDSR'
+import { SaleEditDialog } from '@/components/erp/modules/SaleEditDialog'
 import {
   BookOpen,
   Search,
@@ -45,17 +47,34 @@ import {
   Download,
   TrendingUp,
   TrendingDown,
+  Printer,
+  Pencil,
 } from 'lucide-react'
 import type { Sale, SaleItem } from '@/lib/db/dexie'
 
 export function SalesLedger() {
   const sales = useSales()
+  const customers = useCustomers()
   const { toast } = useToast()
   const [search, setSearch] = useState('')
   const [mode, setMode] = useState<'All' | 'Cash' | 'Credit'>('All')
   const [fromDate, setFromDate] = useState('')
   const [toDate, setToDate] = useState('')
   const [viewSale, setViewSale] = useState<{ sale: Sale; items: SaleItem[] } | null>(null)
+
+  // Upgrade 2 — Edit dialog state. When editSaleId is non-null, the
+  // SaleEditDialog is mounted and loads that sale via SaleService.get().
+  const [editSaleId, setEditSaleId] = useState<number | null>(null)
+  const [editOpen, setEditOpen] = useState(false)
+
+  // ---- DSR Print State ----
+  const [dsrOpen, setDsrOpen] = useState(false)
+  const [dsrDate, setDsrDate] = useState(todayISO())
+
+  // ---- DSR: sales filtered for the selected date ----
+  const dsrSales = useMemo(() => {
+    return (sales ?? []).filter((s) => s.date === dsrDate)
+  }, [sales, dsrDate])
 
   const filtered = useMemo(() => {
     let list = sales ?? []
@@ -126,15 +145,56 @@ export function SalesLedger() {
     if (detail) setViewSale(detail)
   }
 
+  // Upgrade 2 — open the Edit dialog for a sale
+  const edit = (s: Sale) => {
+    if (s.id == null) return
+    setEditSaleId(s.id)
+    setEditOpen(true)
+  }
+
+  // Upgrade 2 — after a successful edit, refresh the toast confirmation.
+  // The live query (useSales) auto-refreshes when IndexedDB changes, so no
+  // manual refetch is needed here.
+  const onEditSaved = () => {
+    toast({ title: 'Ledger refreshed', description: 'Edit saved.' })
+  }
+
   return (
     <div className="space-y-4">
       <PageHeader
         title="Sales Entry & Ledger"
         description="Master transaction table for all sales with profit & margin analysis."
         actions={
-          <Button variant="outline" onClick={exportCsv}>
-            <Download className="mr-1 h-4 w-4" /> Export CSV
-          </Button>
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex items-center gap-1.5">
+              <Input
+                type="date"
+                value={dsrDate}
+                onChange={(e) => setDsrDate(e.target.value)}
+                className="h-8 w-[140px] text-xs"
+              />
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  if (dsrSales.length === 0) {
+                    toast({
+                      title: 'No sales for this date',
+                      description: `No sales found for ${dsrDate}`,
+                      variant: 'destructive',
+                    })
+                    return
+                  }
+                  setDsrOpen(true)
+                }}
+              >
+                <Printer className="mr-1 h-3.5 w-3.5" /> Print DSR
+              </Button>
+            </div>
+            <Button variant="outline" onClick={exportCsv}>
+              <Download className="mr-1 h-4 w-4" /> Export CSV
+            </Button>
+          </div>
         }
       />
 
@@ -248,10 +308,14 @@ export function SalesLedger() {
                       </TableCell>
                       <TableCell className="text-right">
                         <div className="flex justify-end gap-1">
-                          <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => view(s)}>
+                          <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => view(s)} title="View">
                             <Eye className="h-3.5 w-3.5" />
                           </Button>
-                          <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive" onClick={() => removeSale(s)}>
+                          {/* Upgrade 2 — Edit action: opens SaleEditDialog */}
+                          <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => edit(s)} title="Edit">
+                            <Pencil className="h-3.5 w-3.5" />
+                          </Button>
+                          <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive" onClick={() => removeSale(s)} title="Delete">
                             <Trash2 className="h-3.5 w-3.5" />
                           </Button>
                         </div>
@@ -321,6 +385,24 @@ export function SalesLedger() {
           )}
         </DialogContent>
       </Dialog>
+
+      {/* ---- Daily Sales Report (DSR) Print Modal ---- */}
+      {dsrOpen && (
+        <PrintableDSR
+          sales={dsrSales}
+          customers={customers}
+          date={dsrDate}
+          onClose={() => setDsrOpen(false)}
+        />
+      )}
+
+      {/* ---- Upgrade 2 — Sale Edit Dialog ---- */}
+      <SaleEditDialog
+        saleId={editSaleId}
+        open={editOpen}
+        onOpenChange={setEditOpen}
+        onSaved={onEditSaved}
+      />
     </div>
   )
 }

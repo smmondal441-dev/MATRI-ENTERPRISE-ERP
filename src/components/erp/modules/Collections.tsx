@@ -1,18 +1,27 @@
 'use client'
 
-import { useState, useMemo } from 'react'
-import { useCollections, useDues, useCustomers } from '@/lib/hooks/use-erp'
+import { useState, useMemo, useEffect } from 'react'
+import {
+  useCollections,
+  useDues,
+  useCustomers,
+  useBillDues,
+} from '@/lib/hooks/use-erp'
 import {
   CollectionService,
   DuesService,
   type CustomerDues,
+  type BillDue,
+  type BillAllocation,
 } from '@/lib/services/repository'
 import {
   formatINR,
   formatDate,
   todayISO,
 } from '@/lib/utils/format'
+import type { Customer } from '@/lib/db/dexie'
 import { PageHeader, EmptyState } from '@/components/erp/EmptyState'
+import { Combobox } from '@/components/erp/Combobox'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -33,7 +42,15 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { useToast } from '@/hooks/use-toast'
-import { Wallet, Plus, Trash2, Search, AlertTriangle } from 'lucide-react'
+import {
+  Wallet,
+  Plus,
+  Trash2,
+  Search,
+  AlertTriangle,
+  Wand2,
+  FileText,
+} from 'lucide-react'
 
 export function Collections() {
   const collections = useCollections()
@@ -49,6 +66,72 @@ export function Collections() {
   const [amount, setAmount] = useState(0)
   const [paymentMode, setPaymentMode] = useState<'Cash' | 'Cheque' | 'UPI' | 'Bank'>('Cash')
   const [notes, setNotes] = useState('')
+
+  // Bill-by-bill allocation state (Tally-style "Against Reference").
+  // Keyed by String(sale.id) for ID-safe lookups. Value = amount to allocate
+  // against that invoice from this collection receipt.
+  const [allocations, setAllocations] = useState<Record<string, number>>({})
+
+  // Bill dues for the currently-selected customer (live query — re-runs
+  // whenever sales or collections tables change in IndexedDB).
+  const selectedCustIdNum = customerId
+    ? (customers ?? []).find((c) => String(c.id) === customerId)?.id ?? null
+    : null
+  const billDues = useBillDues(selectedCustIdNum)
+
+  // Reset allocations when the customer changes — old customer's bills
+  // don't apply to the new one, and stale allocations would be misleading.
+  useEffect(() => {
+    setAllocations({})
+  }, [customerId])
+
+  // ---- Allocation math (live) ----
+  // Sum of allocations the user has typed in. Used to show the remaining
+  // "on-account" (unallocated) portion and to validate before save.
+  const allocatedTotal = useMemo(() => {
+    return Object.values(allocations).reduce(
+      (s, v) => s + (Number(v) || 0),
+      0
+    )
+  }, [allocations])
+
+  const unallocated = Math.max(0, amount - allocatedTotal)
+  const overAllocated = allocatedTotal > amount + 0.001 // float epsilon
+
+  // ---- Auto-allocate FIFO helper ----
+  // Fills allocations oldest-bill-first until `amount` is exhausted. Useful
+  // for the common case where the user just wants to clear oldest dues.
+  const autoAllocateFifo = () => {
+    if (!billDues || billDues.length === 0) {
+      toast({
+        title: 'No outstanding bills',
+        description: 'This customer has no open credit bills to allocate.',
+      })
+      return
+    }
+    let remaining = amount
+    const next: Record<string, number> = {}
+    // billDues is sorted by sale.date ascending via the service (oldest first)
+    for (const b of billDues) {
+      if (remaining <= 0) break
+      const sid = String(b.sale.id)
+      const give = Math.min(remaining, b.remaining_due)
+      if (give > 0) {
+        next[sid] = Number(give.toFixed(2))
+        remaining -= give
+      }
+    }
+    setAllocations(next)
+    toast({
+      title: 'Auto-allocated (FIFO)',
+      description: `₹${formatINR(amount - remaining)} split across ${
+        Object.keys(next).length
+      } bill(s).`,
+    })
+  }
+
+  // ---- Clear allocations ----
+  const clearAllocations = () => setAllocations({})
 
   const filteredDues = useMemo(() => {
     const q = search.trim().toLowerCase()
@@ -87,6 +170,32 @@ export function Collections() {
       toast({ title: 'Invalid amount', variant: 'destructive' })
       return
     }
+    // Block save if allocations exceed the collection amount (over-allocation).
+    if (overAllocated) {
+      toast({
+        title: 'Over-allocated',
+        description: `Allocated ${formatINR(allocatedTotal)} exceeds collection amount ${formatINR(amount)}.`,
+        variant: 'destructive',
+      })
+      return
+    }
+    // Build the bill_allocations array. Filter out zero entries so we don't
+    // persist noise. Snapshots invoice_no from the live billDues lookup so
+    // the allocation survives even if the sale is later deleted.
+    const billAllocations: BillAllocation[] = billDues
+      ? Object.entries(allocations)
+          .filter(([, v]) => Number(v) > 0)
+          .map(([sid, v]) => {
+            const due = billDues.find(
+              (b) => String(b.sale.id) === String(sid)
+            )
+            return {
+              sale_id: Number(sid),
+              invoice_no: due?.invoice_no ?? '',
+              amount: Number(Number(v).toFixed(2)),
+            }
+          })
+      : []
     await CollectionService.create({
       date,
       customer_id: cust.id!,
@@ -94,15 +203,23 @@ export function Collections() {
       amount,
       payment_mode: paymentMode,
       notes,
+      // Empty array → stored as null on the server (lump-sum). Non-empty
+      // → JSON-stringified by the push route and round-tripped on pull.
+      bill_allocations:
+        billAllocations.length > 0 ? billAllocations : undefined,
     })
     toast({
       title: 'Collection recorded',
-      description: `${cust.name} · ${formatINR(amount)} (${paymentMode})`,
+      description:
+        billAllocations.length > 0
+          ? `${cust.name} · ${formatINR(amount)} (${paymentMode}) — ${billAllocations.length} bill(s) adjusted`
+          : `${cust.name} · ${formatINR(amount)} (${paymentMode})`,
     })
     setAmount(0)
     setNotes('')
     setCustomerId('')
     setPaymentMode('Cash')
+    setAllocations({})
   }
 
   const removeCollection = async (id: number) => {
@@ -112,7 +229,9 @@ export function Collections() {
   }
 
   const customerCollections = (customerId: number) =>
-    (collections ?? []).filter((c) => c.customer_id === customerId)
+    (collections ?? []).filter(
+      (c) => String(c.customer_id) === String(customerId)
+    )
 
   return (
     <div className="space-y-4">
@@ -142,19 +261,70 @@ export function Collections() {
               <Input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
             </Field>
             <Field label="Customer *">
-              <Select value={customerId} onValueChange={setCustomerId}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Select customer" />
-                </SelectTrigger>
-                <SelectContent>
-                  {(customers ?? []).map((c) => (
-                    <SelectItem key={c.id} value={String(c.id)}>
-                      {c.customer_id} · {c.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <Combobox<Customer>
+                items={customers ?? []}
+                value={customerId}
+                onValueChange={setCustomerId}
+                getItemValue={(c) => String(c.id)}
+                getItemLabel={(c) => `${c.customer_id} · ${c.name}`}
+                filterFn={(c, q) =>
+                  c.name.toLowerCase().includes(q) ||
+                  c.customer_id.toLowerCase().includes(q) ||
+                  c.route_area.toLowerCase().includes(q) ||
+                  (c.phone || '').toLowerCase().includes(q)
+                }
+                placeholder="Search customer by name / code / route / phone..."
+                searchPlaceholder="Search customer..."
+                emptyText="No customer matches your search."
+                renderItem={(c) => {
+                  const due = (dues ?? []).find(
+                    (d) => String(d.customer.id) === String(c.id)
+                  )
+                  const closing = due?.closing_dues ?? 0
+                  return (
+                    <div className="flex w-full items-center justify-between gap-2 leading-tight">
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate font-medium">{c.name}</div>
+                        <div className="text-[11px] text-muted-foreground">
+                          {c.customer_id} · {c.route_area}
+                          {c.phone ? ` · ${c.phone}` : ''}
+                        </div>
+                      </div>
+                      <div className="shrink-0 text-right text-[11px]">
+                        <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                          Closing Due
+                        </div>
+                        <div
+                          className={
+                            closing > 0
+                              ? 'font-semibold text-red-600'
+                              : 'font-semibold text-emerald-600'
+                          }
+                        >
+                          {formatINR(closing)}
+                        </div>
+                      </div>
+                    </div>
+                  )
+                }}
+              />
             </Field>
+
+            {/* ---- Bill-by-bill allocation (Tally-style "Against Reference") ---- */}
+            {customerId && (
+              <BillAllocationTable
+                billDues={billDues}
+                amount={amount}
+                allocations={allocations}
+                setAllocations={setAllocations}
+                allocatedTotal={allocatedTotal}
+                unallocated={unallocated}
+                overAllocated={overAllocated}
+                onAutoFifo={autoAllocateFifo}
+                onClear={clearAllocations}
+              />
+            )}
+
             <Field label="Amount (₹) *">
               <Input
                 type="number"
@@ -281,6 +451,7 @@ export function Collections() {
                     <TableHead>Date</TableHead>
                     <TableHead>Customer</TableHead>
                     <TableHead>Mode</TableHead>
+                    <TableHead>Against Bills</TableHead>
                     <TableHead>Notes</TableHead>
                     <TableHead className="text-right">Amount</TableHead>
                     <TableHead></TableHead>
@@ -295,6 +466,26 @@ export function Collections() {
                         <span className="inline-flex rounded-full bg-muted px-2 py-0.5 text-[10px]">
                           {c.payment_mode}
                         </span>
+                      </TableCell>
+                      {/* Against Bills — shows the invoice numbers this collection
+                          was allocated to. Lump-sum collections show "—". */}
+                      <TableCell className="text-xs">
+                        {c.bill_allocations && c.bill_allocations.length > 0 ? (
+                          <div className="flex flex-wrap gap-1">
+                            {c.bill_allocations.map((a, i) => (
+                              <span
+                                key={i}
+                                className="inline-flex items-center gap-1 rounded bg-blue-50 px-1.5 py-0.5 font-mono text-[10px] text-blue-700"
+                                title={`${formatINR(a.amount)} against ${a.invoice_no}`}
+                              >
+                                <FileText className="h-2.5 w-2.5" />
+                                {a.invoice_no}
+                              </span>
+                            ))}
+                          </div>
+                        ) : (
+                          <span className="text-muted-foreground">—</span>
+                        )}
                       </TableCell>
                       <TableCell className="text-xs text-muted-foreground">{c.notes || '—'}</TableCell>
                       <TableCell className="text-right text-sm font-semibold text-emerald-600">
@@ -324,7 +515,9 @@ export function Collections() {
         <CustomerHistory
           customerId={openCustId}
           collections={customerCollections(openCustId)}
-          dues={dues?.find((d) => d.customer.id === openCustId)}
+          dues={dues?.find(
+            (d) => String(d.customer.id) === String(openCustId)
+          )}
           onClose={() => setOpenCustId(null)}
         />
       )}
@@ -460,6 +653,221 @@ function Mini({
     <div className={`rounded-md border p-2 ${c}`}>
       <div className="text-[10px] uppercase tracking-wide opacity-70">{label}</div>
       <div className="text-sm font-semibold">{value}</div>
+    </div>
+  )
+}
+
+// ----------------------------------------------------------------------------
+// BillAllocationTable — Tally-style "Against Reference" allocation editor
+// ----------------------------------------------------------------------------
+// Shown inside the Record Collection form when a customer is selected.
+// Renders the customer's outstanding credit bills (oldest first) with a
+// per-bill "Allocate ₹" input. Live-validates that the sum of allocations
+// does not exceed the collection `amount`.
+//
+// Props:
+//   billDues         : the customer's outstanding BillDue[] (from useBillDues)
+//   amount           : the collection receipt total (top-level form state)
+//   allocations      : Record<String(sale.id), allocatedAmount>
+//   setAllocations   : setter for the allocations record
+//   allocatedTotal   : sum of all allocations (live)
+//   unallocated      : amount - allocatedTotal (≥ 0; the "on-account" portion)
+//   overAllocated    : boolean — allocations exceed amount
+//   onAutoFifo       : fills allocations oldest-first until amount is exhausted
+//   onClear          : clears all allocations
+// ----------------------------------------------------------------------------
+function BillAllocationTable({
+  billDues,
+  amount,
+  allocations,
+  setAllocations,
+  allocatedTotal,
+  unallocated,
+  overAllocated,
+  onAutoFifo,
+  onClear,
+}: {
+  billDues: BillDue[] | undefined
+  amount: number
+  allocations: Record<string, number>
+  setAllocations: React.Dispatch<React.SetStateAction<Record<string, number>>>
+  allocatedTotal: number
+  unallocated: number
+  overAllocated: boolean
+  onAutoFifo: () => void
+  onClear: () => void
+}) {
+  // Loading state — billDues is undefined while the live query is in flight.
+  if (billDues === undefined) {
+    return (
+      <div className="rounded-md border border-dashed border-border p-3 text-center text-xs text-muted-foreground">
+        <div className="mx-auto h-4 w-4 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+        <span className="mt-1 inline-block">Loading outstanding bills...</span>
+      </div>
+    )
+  }
+
+  // No outstanding bills — customer is fully settled or has only cash sales.
+  if (billDues.length === 0) {
+    return (
+      <div className="rounded-md border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-800">
+        <FileText className="mr-1 inline h-3.5 w-3.5" />
+        No outstanding credit bills for this customer. The collection will be
+        recorded as <strong>on-account</strong> (lump-sum credit).
+      </div>
+    )
+  }
+
+  return (
+    <div className="rounded-md border border-border">
+      {/* Header row with title + actions */}
+      <div className="flex items-center justify-between border-b border-border bg-muted/30 px-3 py-2">
+        <div>
+          <div className="text-xs font-semibold">Against Bills (Reference)</div>
+          <div className="text-[10px] text-muted-foreground">
+            Allocate this receipt across specific invoices — Tally-style.
+          </div>
+        </div>
+        <div className="flex gap-1">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-7 text-[11px]"
+            onClick={onAutoFifo}
+            disabled={amount <= 0}
+            title="Auto-fill oldest bills first until amount is exhausted"
+          >
+            <Wand2 className="mr-1 h-3 w-3" />
+            Auto FIFO
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-7 text-[11px]"
+            onClick={onClear}
+            disabled={Object.keys(allocations).length === 0}
+          >
+            Clear
+          </Button>
+        </div>
+      </div>
+
+      {/* Bills table */}
+      <div className="scrollbar-thin max-h-56 overflow-y-auto">
+        <Table>
+          <TableHeader className="sticky top-0 bg-card">
+            <TableRow>
+              <TableHead className="text-[10px]">Invoice</TableHead>
+              <TableHead className="text-[10px]">Date</TableHead>
+              <TableHead className="text-right text-[10px]">Total</TableHead>
+              <TableHead className="text-right text-[10px]">Paid</TableHead>
+              <TableHead className="text-right text-[10px]">Due</TableHead>
+              <TableHead className="text-right text-[10px]">Allocate ₹</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {billDues.map((b) => {
+              const sid = String(b.sale.id)
+              const alloc = allocations[sid] ?? 0
+              const remainingAfter = b.remaining_due - alloc
+              const overBill = alloc > b.remaining_due + 0.001
+              return (
+                <TableRow key={sid}>
+                  <TableCell className="font-mono text-[10px] font-semibold">
+                    {b.invoice_no}
+                  </TableCell>
+                  <TableCell className="text-[10px] text-muted-foreground">
+                    {formatDate(b.sale.date)}
+                  </TableCell>
+                  <TableCell className="text-right text-[10px]">
+                    {formatINR(b.total_amount)}
+                  </TableCell>
+                  <TableCell className="text-right text-[10px] text-emerald-700">
+                    {b.paid_amount > 0 ? formatINR(b.paid_amount) : '—'}
+                  </TableCell>
+                  <TableCell className="text-right text-[10px]">
+                    <span
+                      className={
+                        b.remaining_due > 0
+                          ? 'font-semibold text-red-600'
+                          : 'text-emerald-600'
+                      }
+                    >
+                      {formatINR(b.remaining_due)}
+                    </span>
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <Input
+                      type="number"
+                      min={0}
+                      step="0.01"
+                      value={alloc || ''}
+                      placeholder="0"
+                      onChange={(e) => {
+                        const v = Number(e.target.value) || 0
+                        setAllocations((prev) => {
+                          const next = { ...prev }
+                          if (v <= 0) {
+                            delete next[sid]
+                          } else {
+                            next[sid] = v
+                          }
+                          return next
+                        })
+                      }}
+                      className={`h-7 w-24 text-right text-[11px] ${
+                        overBill ? 'border-red-500 text-red-700' : ''
+                      }`}
+                      title={
+                        overBill
+                          ? `Exceeds remaining due of ${formatINR(b.remaining_due)}`
+                          : `Remaining after allocation: ${formatINR(Math.max(0, remainingAfter))}`
+                      }
+                    />
+                  </TableCell>
+                </TableRow>
+              )
+            })}
+          </TableBody>
+        </Table>
+      </div>
+
+      {/* Footer — allocation summary */}
+      <div
+        className={`flex items-center justify-between gap-2 border-t px-3 py-2 text-[11px] ${
+          overAllocated
+            ? 'border-red-300 bg-red-50'
+            : unallocated > 0.001
+            ? 'border-amber-300 bg-amber-50'
+            : 'border-emerald-300 bg-emerald-50'
+        }`}
+      >
+        <div className="flex flex-wrap gap-3">
+          <span>
+            <strong>Allocated:</strong> {formatINR(allocatedTotal)}
+          </span>
+          <span>
+            <strong>Unallocated (on-account):</strong>{' '}
+            <span className={overAllocated ? 'text-red-700' : 'text-amber-800'}>
+              {formatINR(unallocated)}
+            </span>
+          </span>
+        </div>
+        <div className="flex items-center gap-2">
+          {overAllocated ? (
+            <span className="font-semibold text-red-700">
+              <AlertTriangle className="mr-1 inline h-3 w-3" />
+              Over by {formatINR(allocatedTotal - amount)}
+            </span>
+          ) : Math.abs(allocatedTotal - amount) < 0.001 && amount > 0 ? (
+            <span className="font-semibold text-emerald-700">
+              Fully allocated ✓
+            </span>
+          ) : null}
+        </div>
+      </div>
     </div>
   )
 }

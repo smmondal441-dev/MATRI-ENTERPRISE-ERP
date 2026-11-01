@@ -153,9 +153,25 @@ export interface Collection {
   notes?: string
   created_at: string
 
+  // Bill-by-bill allocation (Tally-style "Against Reference").
+  // Optional — old lump-sum collections have this as undefined.
+  // Each entry references one credit-sale invoice and the amount of this
+  // collection receipt that should be applied against it.
+  bill_allocations?: BillAllocation[]
+
   // v5 — Hybrid sync
   isSynced?: boolean
   synced_at?: string | null
+}
+
+// A single allocation entry: "₹X of this collection is against invoice Y".
+// `sale_id` is the source of truth (always compared via String()).
+// `invoice_no` is a denormalized snapshot for fast display in case the
+// underlying sale is later edited or deleted.
+export interface BillAllocation {
+  sale_id: number
+  invoice_no: string
+  amount: number
 }
 
 export interface DistributorSettings {
@@ -185,6 +201,14 @@ export interface DistributorSettings {
 
 export type DamageReason = 'Broken' | 'Expired' | 'Leaked' | 'Pilferage' | 'Quality'
 
+// Upgrade 3 — Damage Source: Godown vs Store / Market Return Damage.
+//   'godown' → deducts from sellable inventory stock (default; matches all
+//              pre-Upgrade-3 behavior).
+//   'store'  → does NOT touch sellable godown stock; tracked separately in
+//              a "Damaged Stock (Store)" bucket so store-returned damaged
+//              goods are accounted for without losing good inventory.
+export type DamageSource = 'godown' | 'store'
+
 export interface Damage {
   id?: number
   date: string
@@ -199,6 +223,14 @@ export interface Damage {
   notes?: string
   // Cost valuation at the moment of damage (purchase_rate_per_pcs × total_pcs)
   expense_value: number
+  // Upgrade 3 — Damage Source: 'godown' (default) or 'store'.
+  // Optional so old rows (pre-Upgrade-3) read as undefined → UI treats as 'godown'.
+  damage_source?: DamageSource
+  // Optional customer/store reference when damage_source = 'store'.
+  customer_id?: number
+  // Denormalized customer_name for fast display in the Damages log without
+  // needing to join/lookup the customer by id.
+  customer_name?: string
   created_at: string
 
   // v5 — Hybrid sync
@@ -360,6 +392,13 @@ export class FmcgDatabase extends Dexie {
     // launch and never re-checked against table counts again.
     this.version(6).stores({
       meta: 'key',
+    })
+    // v7 — Upgrade 3: Damage source (godown vs store) + optional customer_id.
+    // No structural change to indexes — just widening the typed Damage object
+    // so the new fields round-trip through sync without breaking existing rows.
+    // Existing rows have damage_source=undefined → UI treats them as 'godown'.
+    this.version(7).stores({
+      damages: '++id, date, product_id, product_sku, reason, damage_source, customer_id, created_at, isSynced',
     })
   }
 }

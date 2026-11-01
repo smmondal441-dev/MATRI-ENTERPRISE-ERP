@@ -18,6 +18,7 @@ import {
   formatDate,
 } from '@/lib/utils/format'
 import { PageHeader } from '@/components/erp/EmptyState'
+import { Combobox } from '@/components/erp/Combobox'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -153,11 +154,15 @@ export function SalesBill() {
   const addProductToCart = (productId: string) => {
     const prod = (products ?? []).find((p) => String(p.id) === productId)
     if (!prod) return
+    // Safe ID comparison — prod.id can be a number (Dexie auto-increment) or a
+    // BigInt-stringified value pulled from Turso. Coerce both sides so the
+    // existing-cart lookup never misses a match.
+    const prodIdStr = String(prod.id)
     setCart((prev) => {
-      const existing = prev.find((l) => l.product.id === prod.id)
+      const existing = prev.find((l) => String(l.product.id) === prodIdStr)
       if (existing) {
         return prev.map((l) =>
-          l.product.id === prod.id ? { ...l, qtyPcs: l.qtyPcs + 1 } : l
+          String(l.product.id) === prodIdStr ? { ...l, qtyPcs: l.qtyPcs + 1 } : l
         )
       }
       return [
@@ -261,35 +266,74 @@ export function SalesBill() {
                   <Input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
                 </Field>
                 <Field label="Customer *" className="sm:col-span-2">
-                  <Select value={customerId} onValueChange={setCustomerId}>
-                    <SelectTrigger>
-                      <SelectValue placeholder="Select customer" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {(customers ?? []).map((c) => (
-                        <SelectItem key={c.id} value={String(c.id)}>
-                          {c.customer_id} · {c.name} ({c.route_area})
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                  <Combobox<Customer>
+                    items={customers ?? []}
+                    value={customerId}
+                    onValueChange={setCustomerId}
+                    getItemValue={(c) => String(c.id)}
+                    getItemLabel={(c) => `${c.customer_id} · ${c.name} (${c.route_area})`}
+                    filterFn={(c, q) =>
+                      c.name.toLowerCase().includes(q) ||
+                      c.customer_id.toLowerCase().includes(q) ||
+                      c.route_area.toLowerCase().includes(q) ||
+                      (c.phone || '').toLowerCase().includes(q)
+                    }
+                    placeholder="Search customer by name / code / route / phone..."
+                    searchPlaceholder="Search customer..."
+                    emptyText="No customer matches your search."
+                    renderItem={(c) => (
+                      <div className="flex flex-col leading-tight">
+                        <span className="font-medium">{c.name}</span>
+                        <span className="text-[11px] text-muted-foreground">
+                          {c.customer_id} · {c.route_area}
+                          {c.phone ? ` · ${c.phone}` : ''}
+                        </span>
+                      </div>
+                    )}
+                  />
                 </Field>
               </div>
 
               <div className="mt-3">
                 <Field label="Add Product to Cart">
-                  <Select value="" onValueChange={addProductToCart}>
-                    <SelectTrigger>
-                      <SelectValue placeholder="Search & select product to add to bill" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {(products ?? []).map((p) => (
-                        <SelectItem key={p.id} value={String(p.id)}>
-                          {p.sku} · {p.name} — Sell {formatINR(getSellingRatePerPiece(p))}/Pcs · Margin {formatINR(getProfitPerPiece(p))}/Pcs
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                  <Combobox<Product>
+                    items={products ?? []}
+                    value=""
+                    onValueChange={(v) => {
+                      if (v) addProductToCart(v)
+                    }}
+                    getItemValue={(p) => String(p.id)}
+                    getItemLabel={(p) =>
+                      `${p.sku} · ${p.name} — Sell ${formatINR(getSellingRatePerPiece(p))}/Pcs · Margin ${formatINR(getProfitPerPiece(p))}/Pcs`
+                    }
+                    filterFn={(p, q) =>
+                      p.name.toLowerCase().includes(q) ||
+                      p.sku.toLowerCase().includes(q) ||
+                      p.company_name.toLowerCase().includes(q) ||
+                      p.hsn_code.toLowerCase().includes(q)
+                    }
+                    placeholder="Search & select product to add to bill..."
+                    searchPlaceholder="Search by name / SKU / company / HSN..."
+                    emptyText="No product matches your search."
+                    renderItem={(p) => (
+                      <div className="flex w-full items-center justify-between gap-2 leading-tight">
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate font-medium">{p.name}</div>
+                          <div className="text-[11px] text-muted-foreground">
+                            {p.sku} · Stock {formatNumber(p.opening_stock_pcs, 0)} {p.base_unit}
+                          </div>
+                        </div>
+                        <div className="shrink-0 text-right text-[11px]">
+                          <div className="font-semibold text-emerald-700">
+                            Sell {formatINR(getSellingRatePerPiece(p))}/{p.base_unit}
+                          </div>
+                          <div className="text-muted-foreground">
+                            Margin {formatINR(getProfitPerPiece(p))}/{p.base_unit}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  />
                 </Field>
               </div>
             </CardContent>

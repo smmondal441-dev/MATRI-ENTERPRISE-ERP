@@ -280,9 +280,47 @@ export async function syncAllPending(): Promise<{
     }
 
     // Strip isSynced/synced_at from the payload (server sets its own)
+    // AND normalize all date fields defensively before pushing (Change 2):
+    //   - Business dates (date, mfg_date, expiry_date) → YYYY-MM-DD via slice(0,10)
+    //     so a stray ISO timestamp doesn't shift the calendar day in IST.
+    //   - created_at → re-stamped via new Date(...).toISOString() so the
+    //     server's Prisma layer always receives a UTC 'Z' string.
     const cleanBatches: Record<string, any[]> = {}
     for (const k of Object.keys(batches) as EntityName[]) {
-      cleanBatches[k] = batches[k].map(({ isSynced, synced_at, ...rest }: any) => rest)
+      cleanBatches[k] = batches[k].map(
+        ({ isSynced, synced_at, ...rest }: any) => {
+          // Business dates — slice to YYYY-MM-DD
+          if (rest.date !== undefined && rest.date !== null && rest.date !== '') {
+            rest.date = String(rest.date).slice(0, 10)
+          }
+          if (
+            rest.mfg_date !== undefined &&
+            rest.mfg_date !== null &&
+            rest.mfg_date !== ''
+          ) {
+            rest.mfg_date = String(rest.mfg_date).slice(0, 10)
+          }
+          if (
+            rest.expiry_date !== undefined &&
+            rest.expiry_date !== null &&
+            rest.expiry_date !== ''
+          ) {
+            rest.expiry_date = String(rest.expiry_date).slice(0, 10)
+          }
+          // created_at — enforce ISO-8601 UTC 'Z'
+          if (
+            rest.created_at !== undefined &&
+            rest.created_at !== null &&
+            rest.created_at !== ''
+          ) {
+            const d = new Date(rest.created_at)
+            if (!isNaN(d.getTime())) {
+              rest.created_at = d.toISOString()
+            }
+          }
+          return rest
+        }
+      )
     }
 
     // POST to /api/sync/push
@@ -398,6 +436,16 @@ export interface PullResult {
   totalRecords: number
   counts: Record<EntityName, number>
   error?: string
+  // Upgrade: surface schema-sync warnings so the boot sequence / Settings
+  // page can tell the user "your Turso DB is missing columns — run
+  // `npm run db:push-turso`" instead of silently showing partial data.
+  needsSchemaSync?: boolean
+  failedTables?: { table: string; error?: string }[]
+  // Tables that Prisma couldn't query but the raw-SQL fallback recovered.
+  // The user should still run `db:push-turso --cleanup-only` to fix the
+  // underlying legacy rows so Prisma succeeds next time.
+  recoveredTables?: string[]
+  tableCounts?: Record<string, number>
 }
 
 export async function pullFromServer(): Promise<PullResult> {
@@ -431,6 +479,11 @@ export async function pullFromServer(): Promise<PullResult> {
       ok: boolean
       pulledAt: string
       totalRecords: number
+      // New diagnostic fields from the upgraded pull route:
+      tableCounts?: Record<string, number>
+      failedTables?: { table: string; error?: string }[]
+      recoveredTables?: string[]
+      needsSchemaSync?: boolean
       data: {
         products?: any[]
         customers?: any[]
@@ -504,6 +557,51 @@ export async function pullFromServer(): Promise<PullResult> {
     const total = Object.values(counts).reduce((s, n) => s + n, 0)
     console.log('[pullFromServer] Pulled', total, 'records from server:', counts)
 
+    // ---- Surface schema-sync warnings ----
+    // If the server reported any failed tables (P2022 / missing columns),
+    // log a clear, actionable warning so the user knows the partial pull is
+    // NOT because the server is empty — it's because the schema is out of sync.
+    if (json.needsSchemaSync && json.failedTables && json.failedTables.length > 0) {
+      console.error(
+        '[pullFromServer] ⚠️  PARTIAL PULL — ' +
+          json.failedTables.length +
+          ' table(s) failed due to schema mismatch:'
+      )
+      for (const f of json.failedTables) {
+        console.error(
+          `[pullFromServer]   ✗ ${f.table}: ${f.error?.slice(0, 120) ?? 'unknown error'}`
+        )
+      }
+      console.error(
+        '[pullFromServer] 🔧 FIX: Run `npm run db:push-turso` on the server ' +
+          'to sync the Turso schema, then refresh this page to pull again.'
+      )
+      console.error(
+        '[pullFromServer] Per-table counts:',
+        json.tableCounts
+      )
+    }
+    // ---- Surface raw-SQL recovery warnings ----
+    // Even if needsSchemaSync is false, some tables may have been recovered
+    // via the raw-SQL fallback (Prisma choked on legacy rows but raw SELECT *
+    // got them). The user should run `db:push-turso --cleanup-only` to fix
+    // the underlying rows so Prisma succeeds next time.
+    if (json.recoveredTables && json.recoveredTables.length > 0) {
+      console.warn(
+        '[pullFromServer] ⚠️  ' +
+          json.recoveredTables.length +
+          ' table(s) recovered via raw SQL fallback (Prisma findMany() failed ' +
+          'on legacy rows but raw SELECT * succeeded): '
+      )
+      for (const t of json.recoveredTables) {
+        console.warn(`[pullFromServer]   ⚠️  ${t}`)
+      }
+      console.warn(
+        '[pullFromServer] 🔧 FIX: Run `npm run db:cleanup-turso` on the server ' +
+          'to normalize timestamps + fill NULLs so Prisma succeeds next time.'
+      )
+    }
+
     // Update the pending counts (pulled records are isSynced=true, so counts
     // should be 0 unless there were pre-existing un-synced local records).
     await refreshPendingCounts()
@@ -512,6 +610,12 @@ export async function pullFromServer(): Promise<PullResult> {
       ok: true,
       totalRecords: total,
       counts,
+      // Carry the diagnostic fields up to the caller (boot sequence /
+      // Settings page) so they can surface a user-facing warning.
+      needsSchemaSync: json.needsSchemaSync,
+      failedTables: json.failedTables,
+      recoveredTables: json.recoveredTables,
+      tableCounts: json.tableCounts,
     }
   } catch (e: any) {
     console.error('[pullFromServer] Error:', e?.message ?? e)

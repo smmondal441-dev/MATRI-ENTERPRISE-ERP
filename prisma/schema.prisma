@@ -1,18 +1,17 @@
 // ============================================================================
-// FMCG Distribution House ERP — Prisma schema (CockroachDB)
+// FMCG Distribution House ERP — Prisma schema (Turso / libSQL / SQLite)
 // ----------------------------------------------------------------------------
-// v3 — BigInt primary keys for CockroachDB compatibility
+// v5 — ALL integer fields changed to BigInt
 //
-// Each table has TWO ID columns:
-//   - `id`      BigInt @id @default(autoincrement())  — server-generated 64-bit
-//               integer, never conflicts with client IDs
-//   - `localId` Int    @unique                       — the client-side Dexie ID
-//               (32-bit int from IndexedDB auto-increment), used as the upsert
-//               match key
+// ALL integer columns are now BigInt (64-bit). This prevents overflow errors
+// when data migrated from CockroachDB (which uses unique_rowid() = 64-bit)
+// is stored in columns that were previously Int (32-bit).
 //
-// Why BigInt? CockroachDB's unique_rowid() returns 64-bit integers. Using Int
-// (32-bit) for @default(autoincrement()) can overflow at 2^31 and cause
-// "value out of range" errors. BigInt maps to CockroachDB's BIGINT type.
+// The libSQL client uses intMode: 'bigint' in db.ts, which returns ALL
+// integers as native BigInt. Prisma's BigInt type accepts these natively.
+//
+// The sync routes' bigIntReplacer + toNum() helpers handle the conversion
+// between BigInt (server) and number (client/Dexie).
 // ============================================================================
 
 generator client {
@@ -20,8 +19,8 @@ generator client {
 }
 
 datasource db {
-  provider = "cockroachdb"
-  url      = env("DATABASE_URL")
+  provider = "sqlite"
+  url      = "file:./prisma-dummy.db"
 }
 
 // ----------------------------------------------------------------------------
@@ -30,7 +29,7 @@ datasource db {
 
 model Product {
   id                            BigInt   @id @default(autoincrement())
-  localId                       Int      @unique @map("local_id")
+  localId                       BigInt   @unique @map("local_id")
   sku                           String
   companyName                   String   @map("company_name")
   name                          String
@@ -61,7 +60,7 @@ model Product {
 
 model Customer {
   id              BigInt   @id @default(autoincrement())
-  localId         Int      @unique @map("local_id")
+  localId         BigInt   @unique @map("local_id")
   customerId      String   @map("customer_id")
   name            String
   routeArea       String   @map("route_area")
@@ -80,12 +79,12 @@ model Customer {
 
 model Purchase {
   id              BigInt   @id @default(autoincrement())
-  localId         Int      @unique @map("local_id")
+  localId         BigInt   @unique @map("local_id")
   billNo          String   @map("bill_no")
   date            String
   supplierName    String   @map("supplier_name")
   supplierGstin   String?  @map("supplier_gstin")
-  productId       Int      @map("product_id")
+  productId       BigInt   @map("product_id")
   productSku      String   @map("product_sku")
   productName     String   @map("product_name")
   hsnCode         String   @map("hsn_code")
@@ -111,10 +110,10 @@ model Purchase {
 
 model Sale {
   id                  BigInt   @id @default(autoincrement())
-  localId             Int      @unique @map("local_id")
+  localId             BigInt   @unique @map("local_id")
   invoiceNo           String   @map("invoice_no")
   date                String
-  customerId          Int      @map("customer_id")
+  customerId          BigInt   @map("customer_id")
   customerName        String   @map("customer_name")
   paymentMode         String   @map("payment_mode")
   subtotal            Float
@@ -135,9 +134,9 @@ model Sale {
 
 model SaleItem {
   id                  BigInt   @id @default(autoincrement())
-  localId             Int      @unique @map("local_id")
-  saleLocalId         Int      @map("sale_local_id")
-  productId           Int      @map("product_id")
+  localId             BigInt   @unique @map("local_id")
+  saleLocalId         BigInt   @map("sale_local_id")
+  productId           BigInt   @map("product_id")
   productName         String   @map("product_name")
   productSku          String   @map("product_sku")
   hsnCode             String   @map("hsn_code")
@@ -162,13 +161,18 @@ model SaleItem {
 
 model Collection {
   id              BigInt   @id @default(autoincrement())
-  localId         Int      @unique @map("local_id")
+  localId         BigInt   @unique @map("local_id")
   date            String
-  customerId      Int      @map("customer_id")
+  customerId      BigInt   @map("customer_id")
   customerName    String   @map("customer_name")
   amount          Float
   paymentMode     String   @map("payment_mode")
   notes           String?
+  // Bill-by-bill allocation (Tally-style "Against Reference").
+  // Stored as a JSON-stringified array of { sale_id, invoice_no, amount }
+  // so a single Collection receipt can be split across multiple invoices.
+  // Null / empty for legacy lump-sum collections — fully backward compatible.
+  billAllocations String?  @map("bill_allocations")
   createdAt       DateTime @map("created_at")
   syncedAt        DateTime? @map("synced_at")
   @@map("collections")
@@ -180,7 +184,7 @@ model Collection {
 
 model DistributorSetting {
   id              BigInt   @id @default(autoincrement())
-  localId         Int      @unique @map("local_id")
+  localId         BigInt   @unique @map("local_id")
   storeName       String   @map("store_name")
   subtitle        String?
   gstin           String
@@ -201,9 +205,9 @@ model DistributorSetting {
 
 model Damage {
   id              BigInt   @id @default(autoincrement())
-  localId         Int      @unique @map("local_id")
+  localId         BigInt   @unique @map("local_id")
   date            String
-  productId       Int      @map("product_id")
+  productId       BigInt   @map("product_id")
   productSku      String   @map("product_sku")
   productName     String   @map("product_name")
   hsnCode         String   @map("hsn_code")
@@ -213,6 +217,16 @@ model Damage {
   reason          String
   notes           String?
   expenseValue    Float    @map("expense_value")
+  // Upgrade 3 — Damage Source: Godown vs Store
+  //   "godown" → deducts from sellable inventory stock (default; backward
+  //              compatible — existing rows get this value on first read).
+  //   "store"  → does NOT touch sellable stock; tracked separately as
+  //              "Damaged Stock (Store)" in Inventory.
+  damageSource    String   @default("godown") @map("damage_source")
+  // Optional customer/store reference when damage_source = "store". Null for
+  // godown damages. Nullable + optional so old rows and old clients remain
+  // compatible without a data migration.
+  customerId      BigInt?  @map("customer_id")
   createdAt       DateTime @map("created_at")
   syncedAt        DateTime? @map("synced_at")
   @@map("damages")
@@ -224,13 +238,13 @@ model Damage {
 
 model PurchaseReturn {
   id                       BigInt   @id @default(autoincrement())
-  localId                  Int      @unique @map("local_id")
+  localId                  BigInt   @unique @map("local_id")
   date                     String
-  originalPurchaseId       Int?     @map("original_purchase_id")
+  originalPurchaseId       BigInt?  @map("original_purchase_id")
   returnNo                 String   @map("return_no")
   supplierName             String   @map("supplier_name")
   supplierGstin            String?  @map("supplier_gstin")
-  productId                Int      @map("product_id")
+  productId                BigInt   @map("product_id")
   productSku               String   @map("product_sku")
   productName              String   @map("product_name")
   hsnCode                  String   @map("hsn_code")
@@ -256,13 +270,13 @@ model PurchaseReturn {
 
 model SalesReturn {
   id                  BigInt   @id @default(autoincrement())
-  localId             Int      @unique @map("local_id")
+  localId             BigInt   @unique @map("local_id")
   date                String
-  originalSaleId      Int?     @map("original_sale_id")
+  originalSaleId      BigInt?  @map("original_sale_id")
   returnNo            String   @map("return_no")
-  customerId          Int      @map("customer_id")
+  customerId          BigInt   @map("customer_id")
   customerName        String   @map("customer_name")
-  productId           Int      @map("product_id")
+  productId           BigInt   @map("product_id")
   productSku          String   @map("product_sku")
   productName         String   @map("product_name")
   hsnCode             String   @map("hsn_code")
@@ -291,7 +305,7 @@ model SyncAuditLog {
   eventType    String   @map("event_type")
   entityType   String?  @map("entity_type")
   entityId     BigInt?  @map("entity_id")
-  recordCount  Int?     @map("record_count")
+  recordCount  BigInt?  @map("record_count")
   status       String
   message      String?
   createdAt    DateTime @default(now()) @map("created_at")

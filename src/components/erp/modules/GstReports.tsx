@@ -112,7 +112,9 @@ function Gstr1Report() {
       const d = new Date(s.date)
       return d.getMonth() === monthIdx && d.getFullYear() === Number(year)
     }).flatMap((s) => {
-      const cust = (customers ?? []).find((c) => c.id === s.customer_id)
+      const cust = (customers ?? []).find(
+        (c) => String(c.id) === String(s.customer_id)
+      )
       // We need sale_items but Sales Ledger only stores aggregated; we recompute
       // from sale subtotals & CGST/SGST split.
       // For HSN we would need item-level lookup; since the sale has it on items,

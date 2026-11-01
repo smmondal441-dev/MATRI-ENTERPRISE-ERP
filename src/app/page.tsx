@@ -19,6 +19,8 @@ import {
   X,
   AlertTriangle,
   Undo2,
+  PanelLeftClose,
+  PanelLeftOpen,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
@@ -76,6 +78,35 @@ export default function Home() {
   const [active, setActive] = useState<ModuleKey>('dashboard')
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [booted, setBooted] = useState(false)
+
+  // ---- Desktop sidebar collapse (Upgrade 1) ----
+  // Persisted in localStorage so the user's preference survives page refresh.
+  // Default: expanded (false). When collapsed, the sidebar slides out on
+  // desktop too (not just mobile), and the main content area expands to
+  // 100% viewport width via the `main-content-fullwidth` class.
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+
+  // Hydrate the collapsed state from localStorage on first mount.
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem('matri.sidebar.collapsed')
+      if (saved === 'true') setSidebarCollapsed(true)
+    } catch {
+      // localStorage may be disabled (private mode, etc.) — silently ignore.
+    }
+  }, [])
+
+  // Persist on change.
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        'matri.sidebar.collapsed',
+        String(sidebarCollapsed)
+      )
+    } catch {
+      // Silently ignore — UI still works without persistence.
+    }
+  }, [sidebarCollapsed])
 
   useEffect(() => {
     ;(async () => {
@@ -177,10 +208,21 @@ export default function Home() {
   return (
     <div className="flex min-h-screen bg-background">
       {/* ---------- Sidebar ---------- */}
+      {/*
+        Upgrade 1: Collapsible / Auto-Hide Sidebar.
+        - Mobile (below lg): drawer pattern with overlay (unchanged).
+        - Desktop (lg+): when `sidebarCollapsed` is true, the sidebar slides
+          out via `-translate-x-full` and `lg:w-0` so it no longer occupies
+          layout space, letting the main content expand to 100% width.
+        - `transition-all` gives a smooth slide animation on both platforms.
+      */}
       <aside
         className={cn(
-          'no-print fixed inset-y-0 left-0 z-50 w-64 transform border-r border-border bg-sidebar transition-transform lg:static lg:translate-x-0',
-          sidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'
+          'no-print fixed inset-y-0 left-0 z-50 w-64 transform border-r border-border bg-sidebar transition-all lg:static lg:transition-all',
+          // Mobile drawer: open / closed
+          sidebarOpen ? 'translate-x-0' : '-translate-x-full',
+          // Desktop: hidden when collapsed; visible when expanded
+          sidebarCollapsed ? 'lg:-translate-x-full lg:w-0 lg:border-0 lg:overflow-hidden' : 'lg:translate-x-0'
         )}
       >
         <div className="flex h-16 items-center gap-2 border-b border-sidebar-border px-5">
@@ -249,6 +291,7 @@ export default function Home() {
       {/* ---------- Main content ---------- */}
       <div className="flex min-w-0 flex-1 flex-col">
         <header className="no-print sticky top-0 z-30 flex h-16 items-center gap-3 border-b border-border bg-background/95 px-4 backdrop-blur lg:px-6">
+          {/* Mobile: open drawer (existing) */}
           <Button
             variant="ghost"
             size="icon"
@@ -256,6 +299,21 @@ export default function Home() {
             onClick={() => setSidebarOpen(true)}
           >
             <Menu className="h-5 w-5" />
+          </Button>
+          {/* Desktop: collapse / expand sidebar toggle (Upgrade 1) */}
+          <Button
+            variant="ghost"
+            size="icon"
+            className="hidden lg:inline-flex"
+            onClick={() => setSidebarCollapsed((v) => !v)}
+            title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+            aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          >
+            {sidebarCollapsed ? (
+              <PanelLeftOpen className="h-5 w-5" />
+            ) : (
+              <PanelLeftClose className="h-5 w-5" />
+            )}
           </Button>
           <div className="min-w-0">
             <h1 className="truncate text-base font-semibold capitalize text-foreground">
@@ -271,7 +329,20 @@ export default function Home() {
         </header>
 
         <main className="flex-1 p-4 lg:p-6">
-          <div className="mx-auto max-w-7xl">{renderModule()}</div>
+          {/*
+            Upgrade 1: when sidebar is collapsed, drop the max-width constraint
+            so modules (Sales, Ledger, Inventory, Reports) can use the full
+            viewport width. The `main-content-fullwidth` class is defined in
+            globals.css to override `max-w-7xl` with `max-width: 100%`.
+          */}
+          <div
+            className={cn(
+              'mx-auto',
+              sidebarCollapsed ? 'main-content-fullwidth' : 'max-w-7xl'
+            )}
+          >
+            {renderModule()}
+          </div>
         </main>
       </div>
     </div>

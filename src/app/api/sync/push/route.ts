@@ -77,10 +77,30 @@ function bigIntReplacer(_key: string, value: any): any {
 }
 
 // ----------------------------------------------------------------------------
-// Helper — safe number coercion
+// Helpers — safe type coercion (handles BigInt from libSQL intMode: 'bigint')
 // ----------------------------------------------------------------------------
 
+// For BigInt fields — converts any input to BigInt
+function bigInt(val: any, fallback: bigint = BigInt(0)): bigint {
+  if (typeof val === 'bigint') return val
+  if (val === null || val === undefined || val === '') return fallback
+  const n = Number(val)
+  if (isNaN(n)) return fallback
+  return BigInt(Math.trunc(n))
+}
+
+// For nullable BigInt fields — returns BigInt or null
+function nullableBigInt(val: any): bigint | null {
+  if (val === null || val === undefined || val === '') return null
+  if (typeof val === 'bigint') return val
+  const n = Number(val)
+  if (isNaN(n)) return null
+  return BigInt(Math.trunc(n))
+}
+
+// For Float fields — converts any input to number
 function num(val: any, fallback = 0): number {
+  if (typeof val === 'bigint') return Number(val)
   const n = Number(val)
   return isNaN(n) ? fallback : n
 }
@@ -95,10 +115,28 @@ function nullableStr(val: any): string | null {
   return String(val)
 }
 
+// Change 2 — normalize business dates to YYYY-MM-DD (10 chars). Strips any
+// ISO timestamp tail so IST timezone day-shift never occurs. Returns the
+// input as-is for empty/null/undefined so callers control nullability.
+function isoDateOnly(val: any): string {
+  if (val === null || val === undefined || val === '') return ''
+  return String(val).slice(0, 10)
+}
+
+function nullableIsoDateOnly(val: any): string | null {
+  if (val === null || val === undefined || val === '') return null
+  return String(val).slice(0, 10)
+}
+
+// Change 2 — always returns a Date object whose internal timestamp equals
+// `new Date(val).toISOString()`. This guards against bare YYYY-MM-DD inputs
+// being parsed as local-midnight on servers in non-UTC timezones, which would
+// produce a Date without a UTC 'Z' serialization. Prisma then writes the
+// canonical UTC form to the database.
 function dateOrNow(val: any): Date {
   if (val) {
     const d = new Date(val)
-    if (!isNaN(d.getTime())) return d
+    if (!isNaN(d.getTime())) return new Date(d.toISOString())
   }
   return new Date()
 }
@@ -118,7 +156,7 @@ function dateOrNow(val: any): Date {
 // ----------------------------------------------------------------------------
 
 async function upsertProduct(rec: any): Promise<number> {
-  const localId = num(rec.id)
+  const localId = bigInt(rec.id)
   const data = {
     localId,
     sku: str(rec.sku),
@@ -148,11 +186,11 @@ async function upsertProduct(rec: any): Promise<number> {
     create: data,
     update: data,
   })
-  return localId
+  return Number(localId)
 }
 
 async function upsertCustomer(rec: any): Promise<number> {
-  const localId = num(rec.id)
+  const localId = bigInt(rec.id)
   const data = {
     localId,
     customerId: str(rec.customer_id),
@@ -170,18 +208,18 @@ async function upsertCustomer(rec: any): Promise<number> {
     create: data,
     update: data,
   })
-  return localId
+  return Number(localId)
 }
 
 async function upsertPurchase(rec: any): Promise<number> {
-  const localId = num(rec.id)
+  const localId = bigInt(rec.id)
   const data = {
     localId,
     billNo: str(rec.bill_no),
-    date: str(rec.date),
+    date: isoDateOnly(rec.date),
     supplierName: str(rec.supplier_name),
     supplierGstin: nullableStr(rec.supplier_gstin),
-    productId: num(rec.product_id),
+    productId: bigInt(rec.product_id),
     productSku: str(rec.product_sku),
     productName: str(rec.product_name),
     hsnCode: str(rec.hsn_code),
@@ -194,8 +232,8 @@ async function upsertPurchase(rec: any): Promise<number> {
     cgst: num(rec.cgst),
     sgst: num(rec.sgst),
     totalAmount: num(rec.total_amount),
-    mfgDate: nullableStr(rec.mfg_date),
-    expiryDate: nullableStr(rec.expiry_date),
+    mfgDate: nullableIsoDateOnly(rec.mfg_date),
+    expiryDate: nullableIsoDateOnly(rec.expiry_date),
     createdAt: dateOrNow(rec.created_at),
     syncedAt: new Date(),
   }
@@ -204,16 +242,16 @@ async function upsertPurchase(rec: any): Promise<number> {
     create: data,
     update: data,
   })
-  return localId
+  return Number(localId)
 }
 
 async function upsertSale(rec: any): Promise<number> {
-  const localId = num(rec.id)
+  const localId = bigInt(rec.id)
   const data = {
     localId,
     invoiceNo: str(rec.invoice_no),
-    date: str(rec.date),
-    customerId: num(rec.customer_id),
+    date: isoDateOnly(rec.date),
+    customerId: bigInt(rec.customer_id),
     customerName: str(rec.customer_name),
     paymentMode: str(rec.payment_mode, 'Cash'),
     subtotal: num(rec.subtotal),
@@ -231,15 +269,15 @@ async function upsertSale(rec: any): Promise<number> {
     create: data,
     update: data,
   })
-  return localId
+  return Number(localId)
 }
 
 async function upsertSaleItem(rec: any): Promise<number> {
-  const localId = num(rec.id)
+  const localId = bigInt(rec.id)
   const data = {
     localId,
-    saleLocalId: num(rec.sale_id),
-    productId: num(rec.product_id),
+    saleLocalId: bigInt(rec.sale_id),
+    productId: bigInt(rec.product_id),
     productName: str(rec.product_name),
     productSku: str(rec.product_sku),
     hsnCode: str(rec.hsn_code),
@@ -260,19 +298,39 @@ async function upsertSaleItem(rec: any): Promise<number> {
     create: data,
     update: data,
   })
-  return localId
+  return Number(localId)
 }
 
 async function upsertCollection(rec: any): Promise<number> {
-  const localId = num(rec.id)
+  const localId = bigInt(rec.id)
+  // Bill-by-bill allocations: client stores as a JS array on
+  // Collection.bill_allocations. Server column is a JSON string, so we
+  // serialize here. Empty/missing allocations → null (lump-sum collection).
+  let billAllocationsStr: string | null = null
+  if (Array.isArray(rec.bill_allocations) && rec.bill_allocations.length > 0) {
+    try {
+      billAllocationsStr = JSON.stringify(
+        rec.bill_allocations.map((a: any) => ({
+          sale_id: bigInt(a.sale_id),
+          invoice_no: str(a.invoice_no),
+          amount: num(a.amount),
+        }))
+      )
+    } catch {
+      // Malformed allocation payload — store as null rather than crashing
+      // the whole upsert. The collection itself still saves.
+      billAllocationsStr = null
+    }
+  }
   const data = {
     localId,
-    date: str(rec.date),
-    customerId: num(rec.customer_id),
+    date: isoDateOnly(rec.date),
+    customerId: bigInt(rec.customer_id),
     customerName: str(rec.customer_name),
     amount: num(rec.amount),
     paymentMode: str(rec.payment_mode, 'Cash'),
     notes: nullableStr(rec.notes),
+    billAllocations: billAllocationsStr,
     createdAt: dateOrNow(rec.created_at),
     syncedAt: new Date(),
   }
@@ -281,11 +339,11 @@ async function upsertCollection(rec: any): Promise<number> {
     create: data,
     update: data,
   })
-  return localId
+  return Number(localId)
 }
 
 async function upsertDistributorSetting(rec: any): Promise<number> {
-  const localId = num(rec.id)
+  const localId = bigInt(rec.id)
   const data = {
     localId,
     storeName: str(rec.store_name),
@@ -305,15 +363,15 @@ async function upsertDistributorSetting(rec: any): Promise<number> {
     create: data,
     update: data,
   })
-  return localId
+  return Number(localId)
 }
 
 async function upsertDamage(rec: any): Promise<number> {
-  const localId = num(rec.id)
+  const localId = bigInt(rec.id)
   const data = {
     localId,
-    date: str(rec.date),
-    productId: num(rec.product_id),
+    date: isoDateOnly(rec.date),
+    productId: bigInt(rec.product_id),
     productSku: str(rec.product_sku),
     productName: str(rec.product_name),
     hsnCode: str(rec.hsn_code),
@@ -323,6 +381,14 @@ async function upsertDamage(rec: any): Promise<number> {
     reason: str(rec.reason, 'Broken'),
     notes: nullableStr(rec.notes),
     expenseValue: num(rec.expense_value),
+    // Upgrade 3 — Damage source. Defaults to 'godown' for backward compat
+    // (legacy clients / pre-Upgrade-3 rows that didn't send this field).
+    damageSource: rec.damage_source === 'store' ? 'store' : 'godown',
+    // customer_id only meaningful when source = 'store'; null otherwise.
+    customerId:
+      rec.damage_source === 'store' && rec.customer_id != null
+        ? bigInt(rec.customer_id)
+        : null,
     createdAt: dateOrNow(rec.created_at),
     syncedAt: new Date(),
   }
@@ -331,19 +397,19 @@ async function upsertDamage(rec: any): Promise<number> {
     create: data,
     update: data,
   })
-  return localId
+  return Number(localId)
 }
 
 async function upsertPurchaseReturn(rec: any): Promise<number> {
-  const localId = num(rec.id)
+  const localId = bigInt(rec.id)
   const data = {
     localId,
-    date: str(rec.date),
-    originalPurchaseId: rec.original_purchase_id != null ? num(rec.original_purchase_id) : null,
+    date: isoDateOnly(rec.date),
+    originalPurchaseId: rec.original_purchase_id != null ? bigInt(rec.original_purchase_id) : null,
     returnNo: str(rec.return_no),
     supplierName: str(rec.supplier_name),
     supplierGstin: nullableStr(rec.supplier_gstin),
-    productId: num(rec.product_id),
+    productId: bigInt(rec.product_id),
     productSku: str(rec.product_sku),
     productName: str(rec.product_name),
     hsnCode: str(rec.hsn_code),
@@ -366,19 +432,19 @@ async function upsertPurchaseReturn(rec: any): Promise<number> {
     create: data,
     update: data,
   })
-  return localId
+  return Number(localId)
 }
 
 async function upsertSalesReturn(rec: any): Promise<number> {
-  const localId = num(rec.id)
+  const localId = bigInt(rec.id)
   const data = {
     localId,
-    date: str(rec.date),
-    originalSaleId: rec.original_sale_id != null ? num(rec.original_sale_id) : null,
+    date: isoDateOnly(rec.date),
+    originalSaleId: rec.original_sale_id != null ? bigInt(rec.original_sale_id) : null,
     returnNo: str(rec.return_no),
-    customerId: num(rec.customer_id),
+    customerId: bigInt(rec.customer_id),
     customerName: str(rec.customer_name),
-    productId: num(rec.product_id),
+    productId: bigInt(rec.product_id),
     productSku: str(rec.product_sku),
     productName: str(rec.product_name),
     hsnCode: str(rec.hsn_code),
@@ -401,7 +467,7 @@ async function upsertSalesReturn(rec: any): Promise<number> {
     create: data,
     update: data,
   })
-  return localId
+  return Number(localId)
 }
 
 // ----------------------------------------------------------------------------

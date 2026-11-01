@@ -9,18 +9,13 @@ import {
   formatDate,
   todayISO,
 } from '@/lib/utils/format'
+import type { Product } from '@/lib/db/dexie'
 import { PageHeader, EmptyState } from '@/components/erp/EmptyState'
+import { Combobox } from '@/components/erp/Combobox'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import {
   Table,
   TableBody,
@@ -30,7 +25,7 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { useToast } from '@/hooks/use-toast'
-import { Trash2, Truck, Plus, RotateCcw } from 'lucide-react'
+import { Trash2, Truck, Plus, RotateCcw, AlertTriangle } from 'lucide-react'
 
 export function PurchaseEntry() {
   const products = useProducts()
@@ -98,6 +93,25 @@ export function PurchaseEntry() {
         variant: 'destructive',
       })
       return
+    }
+    // Upgrade 4 — soft warning when MFG or Expiry date is missing.
+    // Inventory FEFO + near-expiry alerts depend on these dates. We don't
+    // block the save (some products genuinely don't have expiry dates), but
+    // we do warn the user so they consciously decide to skip.
+    if (!mfgDate || !expiryDate) {
+      const missing = [
+        !mfgDate ? 'MFG Date' : null,
+        !expiryDate ? 'Expiry Date' : null,
+      ]
+        .filter(Boolean)
+        .join(' + ')
+      if (
+        !confirm(
+          `${missing} not entered. Inventory FEFO / near-expiry alerts depend on these dates. Save anyway?`
+        )
+      ) {
+        return
+      }
     }
     try {
       await PurchaseService.create({
@@ -177,18 +191,40 @@ export function PurchaseEntry() {
 
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
             <Field label="Product *" className="sm:col-span-2">
-              <Select value={productId} onValueChange={setProductId}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Select product (auto-fetches SKU & rate)" />
-                </SelectTrigger>
-                <SelectContent>
-                  {(products ?? []).map((p) => (
-                    <SelectItem key={p.id} value={String(p.id)}>
-                      {p.sku} · {p.name} ({p.company_name})
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <Combobox<Product>
+                items={products ?? []}
+                value={productId}
+                onValueChange={setProductId}
+                getItemValue={(p) => String(p.id)}
+                getItemLabel={(p) => `${p.sku} · ${p.name} (${p.company_name})`}
+                filterFn={(p, q) =>
+                  p.name.toLowerCase().includes(q) ||
+                  p.sku.toLowerCase().includes(q) ||
+                  p.company_name.toLowerCase().includes(q) ||
+                  p.hsn_code.toLowerCase().includes(q)
+                }
+                placeholder="Search & select product (auto-fetches SKU & rate)..."
+                searchPlaceholder="Search by name / SKU / company / HSN..."
+                emptyText="No product matches your search."
+                renderItem={(p) => (
+                  <div className="flex w-full items-center justify-between gap-2 leading-tight">
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate font-medium">{p.name}</div>
+                      <div className="text-[11px] text-muted-foreground">
+                        {p.sku} · {p.company_name} · HSN {p.hsn_code}
+                      </div>
+                    </div>
+                    <div className="shrink-0 text-right text-[11px]">
+                      <div className="font-semibold text-emerald-700">
+                        Buy {formatINR(p.purchase_rate_per_outer_unit)}/{p.outer_unit}
+                      </div>
+                      <div className="text-muted-foreground">
+                        = ₹{p.purchase_rate_per_piece.toFixed(4)}/{p.base_unit}
+                      </div>
+                    </div>
+                  </div>
+                )}
+              />
             </Field>
             <Field label={`Bag Qty (1 Bag = ${conversion} Pcs)`}>
               <Input
@@ -221,6 +257,19 @@ export function PurchaseEntry() {
               />
             </Field>
           </div>
+
+          {/* Upgrade 4 — FEFO hint banner */}
+          {(!mfgDate || !expiryDate) && (
+            <div className="flex items-start gap-2 rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-800">
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span>
+                <strong>Inventory FEFO tip:</strong> MFG &amp; Expiry dates
+                power the Inventory module&apos;s shelf-life tracking
+                (Near-Expiry / Expired filter tabs + days-remaining badges).
+                Please fill them in when the supplier invoice has them.
+              </span>
+            </div>
+          )}
 
           {selectedProduct && (
             <div className="rounded-md border border-border bg-muted/30 p-3 text-xs">

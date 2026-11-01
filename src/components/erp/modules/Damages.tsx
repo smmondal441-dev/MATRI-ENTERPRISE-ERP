@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useMemo } from 'react'
-import { useProducts, useDamages, useDamageTotals } from '@/lib/hooks/use-erp'
+import { useProducts, useDamages, useDamageTotals, useCustomers } from '@/lib/hooks/use-erp'
 import { DamageService, getPurchaseRatePerPiece } from '@/lib/services/repository'
 import {
   formatINR,
@@ -11,6 +11,7 @@ import {
   downloadCSV,
 } from '@/lib/utils/format'
 import { PageHeader, EmptyState } from '@/components/erp/EmptyState'
+import { Combobox } from '@/components/erp/Combobox'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -39,7 +40,7 @@ import {
   Download,
   Skull,
 } from 'lucide-react'
-import type { DamageReason } from '@/lib/db/dexie'
+import type { DamageReason, DamageSource, Product, Customer } from '@/lib/db/dexie'
 
 const REASONS: DamageReason[] = ['Broken', 'Expired', 'Leaked', 'Pilferage', 'Quality']
 
@@ -55,6 +56,7 @@ export function Damages() {
   const products = useProducts()
   const damages = useDamages()
   const totals = useDamageTotals()
+  const customers = useCustomers()
   const { toast } = useToast()
 
   const [date, setDate] = useState(todayISO())
@@ -63,10 +65,23 @@ export function Damages() {
   const [pcsQty, setPcsQty] = useState(0)
   const [reason, setReason] = useState<DamageReason>('Broken')
   const [notes, setNotes] = useState('')
+  // Upgrade 3 — Damage Source: 'godown' (default) or 'store'
+  const [damageSource, setDamageSource] = useState<DamageSource>('godown')
+  // Optional customer reference for store-damages only
+  const [customerId, setCustomerId] = useState('')
 
   const selectedProduct = useMemo(
     () => (products ?? []).find((p) => String(p.id) === productId),
     [products, productId]
+  )
+  // Lookup the customer when damageSource = 'store' so we can save its name
+  // alongside the id for fast display in the log.
+  const selectedCustomer = useMemo(
+    () =>
+      damageSource === 'store'
+        ? (customers ?? []).find((c) => String(c.id) === customerId)
+        : undefined,
+    [customers, customerId, damageSource]
   )
 
   const conversion = selectedProduct?.conversion_factor ?? 1
@@ -81,6 +96,8 @@ export function Damages() {
     setPcsQty(0)
     setReason('Broken')
     setNotes('')
+    setDamageSource('godown')
+    setCustomerId('')
   }
 
   const save = async () => {
@@ -100,15 +117,25 @@ export function Damages() {
       })
       return
     }
-    // Safety check against current stock
-    if (totalPcs > selectedProduct.opening_stock_pcs) {
+    // Upgrade 3 — only enforce the stock-safety check for godown damages.
+    // Store damages don't deduct sellable stock, so the check is meaningless.
+    if (damageSource === 'godown' && totalPcs > selectedProduct.opening_stock_pcs) {
       if (
         !confirm(
-          `Damaged qty (${totalPcs} Pcs) exceeds current stock (${selectedProduct.opening_stock_pcs} Pcs). Continue anyway?`
+          `Damaged qty (${totalPcs} Pcs) exceeds current sellable stock (${selectedProduct.opening_stock_pcs} Pcs). Continue anyway?`
         )
       ) {
         return
       }
+    }
+    // Upgrade 3 — if source = 'store', a customer must be selected.
+    if (damageSource === 'store' && !selectedCustomer) {
+      toast({
+        title: 'Customer required',
+        description: 'Select the store / customer who returned the damaged goods.',
+        variant: 'destructive',
+      })
+      return
     }
     try {
       await DamageService.create({
@@ -123,10 +150,17 @@ export function Damages() {
         reason,
         notes,
         expense_value: expenseValue,
+        // Upgrade 3 fields:
+        damage_source: damageSource,
+        customer_id: damageSource === 'store' ? selectedCustomer!.id! : undefined,
+        customer_name: damageSource === 'store' ? selectedCustomer!.name : undefined,
       })
       toast({
         title: 'Damage recorded',
-        description: `${selectedProduct.name} · ${formatNumber(totalPcs, 0)} Pcs · ${reason} · Stock adjusted −${formatNumber(totalPcs, 0)} Pcs`,
+        description:
+          damageSource === 'godown'
+            ? `${selectedProduct.name} · ${formatNumber(totalPcs, 0)} Pcs · ${reason} · Sellable stock −${formatNumber(totalPcs, 0)} Pcs`
+            : `${selectedProduct.name} · ${formatNumber(totalPcs, 0)} Pcs · ${reason} · Store-damage (no sellable stock change). Customer: ${selectedCustomer!.name}`,
       })
       resetForm()
     } catch (e) {
@@ -134,10 +168,17 @@ export function Damages() {
     }
   }
 
-  const remove = async (id: number, productName: string) => {
-    if (!confirm(`Delete damage entry for "${productName}"? Stock will be restored.`)) return
+  const remove = async (id: number, productName: string, source?: DamageSource) => {
+    const isGodown = source !== 'store'
+    const msg = isGodown
+      ? `Delete damage entry for "${productName}"? Sellable stock will be restored.`
+      : `Delete store-damage entry for "${productName}"? Sellable stock is NOT affected (was a store return damage).`
+    if (!confirm(msg)) return
     await DamageService.remove(id)
-    toast({ title: 'Damage deleted', description: 'Stock restored.' })
+    toast({
+      title: 'Damage deleted',
+      description: isGodown ? 'Sellable stock restored.' : 'Store-damage record removed.',
+    })
   }
 
   const exportCsv = () => {
@@ -195,18 +236,45 @@ export function Damages() {
               <Input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
             </Field>
             <Field label="Product *">
-              <Select value={productId} onValueChange={setProductId}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Select damaged product" />
-                </SelectTrigger>
-                <SelectContent>
-                  {(products ?? []).map((p) => (
-                    <SelectItem key={p.id} value={String(p.id)}>
-                      {p.sku} · {p.name} (Stock: {formatNumber(p.opening_stock_pcs, 0)} Pcs)
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <Combobox<Product>
+                items={products ?? []}
+                value={productId}
+                onValueChange={setProductId}
+                getItemValue={(p) => String(p.id)}
+                getItemLabel={(p) =>
+                  `${p.sku} · ${p.name} (Stock: ${formatNumber(p.opening_stock_pcs, 0)} Pcs)`
+                }
+                filterFn={(p, q) =>
+                  p.name.toLowerCase().includes(q) ||
+                  p.sku.toLowerCase().includes(q) ||
+                  p.company_name.toLowerCase().includes(q) ||
+                  p.hsn_code.toLowerCase().includes(q)
+                }
+                placeholder="Search damaged product by name / SKU / HSN..."
+                searchPlaceholder="Search product..."
+                emptyText="No product matches your search."
+                renderItem={(p) => (
+                  <div className="flex w-full items-center justify-between gap-2 leading-tight">
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate font-medium">{p.name}</div>
+                      <div className="text-[11px] text-muted-foreground">
+                        {p.sku} · {p.company_name}
+                      </div>
+                    </div>
+                    <div className="shrink-0 text-right text-[11px]">
+                      <span
+                        className={
+                          p.opening_stock_pcs > 0
+                            ? 'font-semibold text-emerald-700'
+                            : 'font-semibold text-red-600'
+                        }
+                      >
+                        Stock: {formatNumber(p.opening_stock_pcs, 0)} {p.base_unit}
+                      </span>
+                    </div>
+                  </div>
+                )}
+              />
             </Field>
             <div className="grid grid-cols-2 gap-3">
               <Field label={`Bag Qty (1 Bag = ${conversion} Pcs)`}>
@@ -244,6 +312,63 @@ export function Damages() {
               />
             </Field>
 
+            {/* Upgrade 3 — Damage Source toggle */}
+            <Field label="Damage Source">
+              <Select
+                value={damageSource}
+                onValueChange={(v: DamageSource) => {
+                  setDamageSource(v)
+                  // Clear customer when switching back to godown
+                  if (v !== 'store') setCustomerId('')
+                }}
+              >
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="godown">
+                    Godown / Internal Damage
+                  </SelectItem>
+                  <SelectItem value="store">
+                    Store / Market Return Damage
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="mt-1 text-[10px] leading-snug text-muted-foreground">
+                {damageSource === 'godown'
+                  ? 'Deducts from sellable godown stock. Use for in-warehouse damage.'
+                  : 'Does NOT touch sellable stock. Tracked separately as Damaged Stock (Store). Use for store-returned damaged goods.'}
+              </p>
+            </Field>
+
+            {/* Upgrade 3 — customer picker visible only for store-damages */}
+            {damageSource === 'store' && (
+              <Field label="Customer / Store *">
+                <Combobox<Customer>
+                  items={customers ?? []}
+                  value={customerId}
+                  onValueChange={setCustomerId}
+                  getItemValue={(c) => String(c.id)}
+                  getItemLabel={(c) => `${c.customer_id} · ${c.name}`}
+                  filterFn={(c, q) =>
+                    c.name.toLowerCase().includes(q) ||
+                    c.customer_id.toLowerCase().includes(q) ||
+                    c.route_area.toLowerCase().includes(q) ||
+                    (c.phone || '').toLowerCase().includes(q)
+                  }
+                  placeholder="Select customer / store who returned damaged goods..."
+                  searchPlaceholder="Search customer..."
+                  emptyText="No customer matches your search."
+                  renderItem={(c) => (
+                    <div className="flex flex-col leading-tight">
+                      <span className="font-medium">{c.name}</span>
+                      <span className="text-[11px] text-muted-foreground">
+                        {c.customer_id} · {c.route_area}
+                      </span>
+                    </div>
+                  )}
+                />
+              </Field>
+            )}
+
             {selectedProduct && (
               <div className="rounded-md border border-amber-200 bg-amber-50 p-2.5 text-xs text-amber-900">
                 <div className="flex items-center gap-1.5 font-semibold">
@@ -257,15 +382,32 @@ export function Damages() {
                     value={<strong className="text-red-700">{formatINR(expenseValue)}</strong>}
                   />
                   <div className="border-t border-amber-200 pt-1">
-                    <Row
-                      label="Stock After Adjustment"
-                      value={
-                        <span className={selectedProduct.opening_stock_pcs - totalPcs < 0 ? 'text-red-700 font-semibold' : 'font-semibold'}>
-                          {formatNumber(Math.max(0, selectedProduct.opening_stock_pcs - totalPcs), 0)} Pcs
-                        </span>
-                      }
-                    />
+                    {damageSource === 'godown' ? (
+                      <Row
+                        label="Sellable Stock After Adjustment"
+                        value={
+                          <span className={selectedProduct.opening_stock_pcs - totalPcs < 0 ? 'text-red-700 font-semibold' : 'font-semibold'}>
+                            {formatNumber(Math.max(0, selectedProduct.opening_stock_pcs - totalPcs), 0)} Pcs
+                          </span>
+                        }
+                      />
+                    ) : (
+                      <Row
+                        label="Sellable Stock"
+                        value={
+                          <span className="font-semibold text-emerald-700">
+                            {formatNumber(selectedProduct.opening_stock_pcs, 0)} Pcs · UNCHANGED
+                          </span>
+                        }
+                      />
+                    )}
                   </div>
+                  {damageSource === 'store' && selectedCustomer && (
+                    <Row
+                      label="Damaged Stock (Store)"
+                      value={<span className="font-semibold text-blue-700">+{formatNumber(totalPcs, 0)} Pcs</span>}
+                    />
+                  )}
                 </div>
               </div>
             )}
@@ -309,12 +451,21 @@ export function Damages() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {(damages ?? []).slice(0, 200).map((d) => (
+                    {(damages ?? []).slice(0, 200).map((d) => {
+                      // Upgrade 3 — resolve source badge. Treat undefined
+                      // (legacy rows) as 'godown'.
+                      const src: DamageSource = d.damage_source === 'store' ? 'store' : 'godown'
+                      return (
                       <TableRow key={d.id}>
                         <TableCell className="text-xs">{formatDate(d.date)}</TableCell>
                         <TableCell>
                           <div className="text-sm font-medium">{d.product_name}</div>
                           <div className="font-mono text-[10px] text-muted-foreground">{d.product_sku}</div>
+                          {src === 'store' && d.customer_name && (
+                            <div className="mt-0.5 text-[10px] text-blue-700">
+                              👤 {d.customer_name}
+                            </div>
+                          )}
                         </TableCell>
                         <TableCell className="text-xs">
                           {d.bag_qty} × {d.pcs_qty}
@@ -323,9 +474,21 @@ export function Damages() {
                           {formatNumber(d.total_pcs, 0)}
                         </TableCell>
                         <TableCell>
-                          <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold ${REASON_BADGE[d.reason]}`}>
-                            {d.reason}
-                          </span>
+                          <div className="flex flex-wrap items-center gap-1">
+                            <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold ${REASON_BADGE[d.reason]}`}>
+                              {d.reason}
+                            </span>
+                            <span
+                              className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                                src === 'godown'
+                                  ? 'bg-gray-100 text-gray-700'
+                                  : 'bg-blue-100 text-blue-700'
+                              }`}
+                              title={src === 'godown' ? 'Deducted from sellable stock' : 'Tracked separately — sellable stock unchanged'}
+                            >
+                              {src === 'godown' ? 'Godown' : 'Store'}
+                            </span>
+                          </div>
                         </TableCell>
                         <TableCell className="max-w-[200px] truncate text-xs text-muted-foreground" title={d.notes}>
                           {d.notes || '—'}
@@ -338,13 +501,14 @@ export function Damages() {
                             variant="ghost"
                             size="icon"
                             className="h-7 w-7 text-destructive"
-                            onClick={() => remove(d.id!, d.product_name)}
+                            onClick={() => remove(d.id!, d.product_name, src)}
                           >
                             <Trash2 className="h-3.5 w-3.5" />
                           </Button>
                         </TableCell>
                       </TableRow>
-                    ))}
+                      )
+                    })}
                   </TableBody>
                 </Table>
               </div>

@@ -13,6 +13,7 @@ import {
   DamageService,
   PurchaseReturnService,
   SalesReturnService,
+  BillDuesService,
 } from '@/lib/services/repository'
 
 // Live query hooks — auto re-render when IndexedDB changes.
@@ -72,4 +73,26 @@ export function useSalesReturns() {
 
 export function useDamageTotals() {
   return useLiveQuery(() => DamageService.totals(), [])
+}
+
+// ----------------------------------------------------------------------------
+// Bill-wise dues — Tally-style "Against Reference" allocation support.
+// Returns undefined while the query is in flight (same convention as the other
+// hooks above). When `customerId` is null/undefined, returns an empty array
+// immediately so the UI can render an empty state without a flash.
+//
+// Reactive: re-runs whenever `sales` OR `collections` tables change in
+// IndexedDB (because BillDuesService.all() reads both), so any new collection
+// or sale edit automatically refreshes the outstanding-bills breakdown.
+// ----------------------------------------------------------------------------
+export function useBillDues(
+  customerId: number | null | undefined
+) {
+  return useLiveQuery(
+    async () => {
+      if (customerId == null) return []
+      return BillDuesService.byCustomer(customerId, false)
+    },
+    [customerId]
+  )
 }
