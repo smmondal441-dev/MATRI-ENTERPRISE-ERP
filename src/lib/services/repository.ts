@@ -664,7 +664,7 @@ export const PurchaseService = {
       const prod = await db.products.get(purchase.product_id)
       if (prod) {
         await db.products.update(purchase.product_id, {
-          opening_stock_pcs: Math.max(0, prod.opening_stock_pcs - purchase.total_pcs),
+          opening_stock_pcs: prod.opening_stock_pcs - purchase.total_pcs,
           isSynced: false,
           synced_at: null,
         })
@@ -815,7 +815,7 @@ export const SaleService = {
         const prod = await db.products.get(it.product_id)
         if (prod) {
           await db.products.update(it.product_id, {
-            opening_stock_pcs: Math.max(0, prod.opening_stock_pcs - it.quantity_pcs),
+            opening_stock_pcs: prod.opening_stock_pcs - it.quantity_pcs,
             isSynced: false,
             synced_at: null,
           })
@@ -913,10 +913,7 @@ export const SaleService = {
           const prod = await db.products.get(it.product_id)
           if (prod) {
             await db.products.update(it.product_id, {
-              opening_stock_pcs: Math.max(
-                0,
-                prod.opening_stock_pcs - it.quantity_pcs
-              ),
+              opening_stock_pcs: prod.opening_stock_pcs - it.quantity_pcs,
               isSynced: false,
               synced_at: null,
             })
@@ -1549,7 +1546,7 @@ export const DamageService = {
       // Store damages are tracked separately and do NOT reduce good inventory.
       if (prod && source === 'godown') {
         await db.products.update(d.product_id, {
-          opening_stock_pcs: Math.max(0, prod.opening_stock_pcs - d.total_pcs),
+          opening_stock_pcs: prod.opening_stock_pcs - d.total_pcs,
           isSynced: false,
           synced_at: null,
         })
@@ -1636,7 +1633,7 @@ export const PurchaseReturnService = {
       // Decrement product stock + mark un-synced
       if (prod) {
         await db.products.update(r.product_id, {
-          opening_stock_pcs: Math.max(0, prod.opening_stock_pcs - r.total_pcs),
+          opening_stock_pcs: prod.opening_stock_pcs - r.total_pcs,
           isSynced: false,
           synced_at: null,
         })
@@ -1728,7 +1725,7 @@ export const SalesReturnService = {
         const prod = await db.products.get(ret.product_id)
         if (prod) {
           await db.products.update(ret.product_id, {
-            opening_stock_pcs: Math.max(0, prod.opening_stock_pcs - ret.total_pcs),
+            opening_stock_pcs: prod.opening_stock_pcs - ret.total_pcs,
             isSynced: false,
             synced_at: null,
           })
