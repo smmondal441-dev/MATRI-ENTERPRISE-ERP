@@ -41,9 +41,17 @@ export type EntityName =
 export interface SyncState {
   isOnline: boolean
   isSyncing: boolean
+  // 2-Way Sync — distinct flags for push vs pull so the UI badge can show
+  // which phase is running ("Pushing..." vs "Pulling...").
+  isPushing: boolean
+  isPulling: boolean
   pendingCounts: Record<EntityName, number>
   totalPending: number
   lastSyncAt: string | null
+  // When was the last successful PULL from the server. Stored in the meta
+  // table so it survives page refresh. The boot sequence uses this to decide
+  // whether to re-pull on reopen (>5 min stale → pull).
+  lastPullAt: string | null
   lastError: string | null
 }
 
@@ -56,6 +64,8 @@ type SyncStateListener = (state: SyncState) => void
 const STATE: SyncState = {
   isOnline: typeof navigator !== 'undefined' ? navigator.onLine : true,
   isSyncing: false,
+  isPushing: false,
+  isPulling: false,
   pendingCounts: {
     products: 0,
     customers: 0,
@@ -70,6 +80,7 @@ const STATE: SyncState = {
   },
   totalPending: 0,
   lastSyncAt: null,
+  lastPullAt: null,
   lastError: null,
 }
 
@@ -414,7 +425,59 @@ export async function triggerSyncNow(): Promise<void> {
   // Even if we think we're offline, give it one attempt — the user might
   // have just plugged in ethernet and navigator.onLine hasn't updated yet.
   setState({ isOnline: typeof navigator !== 'undefined' ? navigator.onLine : true })
-  await syncAllPending()
+
+  // ---- 2-Way Sync cycle: PUSH first, then PULL ----
+  // 1. Push: upload all local isSynced=false rows to Turso.
+  // 2. Pull: download all Turso rows, filtering out local-unsynced rows
+  //    so we don't overwrite edits that haven't been pushed yet.
+  // 3. Refresh pending counts.
+  //
+  // Order matters: push FIRST so that when we pull, the server has our
+  // latest changes. If we pulled first, we might overwrite a local unsynced
+  // edit with an older server version (the conflict-protection filter
+  // handles this, but pushing first is still the cleaner sequence).
+
+  // Phase 1: PUSH
+  setState({ isSyncing: true, isPushing: true, lastError: null })
+  try {
+    await syncAllPending()
+  } catch (e: any) {
+    console.warn('[triggerSyncNow] Push phase failed:', e?.message ?? e)
+    // Don't return — still try to pull so the user gets fresh data even if
+    // their local edits couldn't be pushed (e.g. server 500 on one record).
+  }
+
+  // Phase 2: PULL
+  setState({ isPushing: false, isPulling: true })
+  try {
+    const pullResult = await pullFromServer()
+    if (pullResult.ok) {
+      // Store lastPullAt in the meta table so it survives page refresh.
+      const now = new Date().toISOString()
+      try {
+        await db.meta.put({ key: 'lastPullAt', value: now })
+      } catch {
+        // meta table write failed — non-fatal, the in-memory state still updates
+      }
+      setState({ lastPullAt: now })
+      console.log(
+        `[triggerSyncNow] Pull complete: ${pullResult.totalRecords} records`,
+      )
+    } else if (pullResult.error) {
+      console.warn('[triggerSyncNow] Pull phase failed:', pullResult.error)
+    }
+  } catch (e: any) {
+    console.warn('[triggerSyncNow] Pull phase error:', e?.message ?? e)
+  }
+
+  // Phase 3: refresh + done
+  await refreshPendingCounts()
+  setState({
+    isSyncing: false,
+    isPushing: false,
+    isPulling: false,
+    lastSyncAt: new Date().toISOString(),
+  })
 }
 
 // ----------------------------------------------------------------------------
@@ -504,50 +567,156 @@ export async function pullFromServer(): Promise<PullResult> {
 
     const data = json.data
 
-    // ---- Merge into local IndexedDB ----
+    // ---- Conflict protection: don't overwrite unsynced local edits ----
+    // Before bulkPut, load local rows that have isSynced !== true (i.e. they
+    // have local edits that haven't been pushed yet). Build a Set of their IDs
+    // so we can EXCLUDE them from the pulled data. This implements the
+    // "last-write-wins with local-unsynced-protection" strategy:
+    //   - Server rows that are NEW (not in local DB) → inserted (safe).
+    //   - Server rows that match a local SYNCED row → overwritten (safe — already pushed).
+    //   - Server rows that match a local UNSYNCED row → SKIPPED (local edit wins).
+    //
+    // After the pull, the user's unsynced edits remain intact and will be
+    // pushed on the next sync cycle, at which point the server gets the latest.
+
+    // Build the unsynced-ID set for each table.
+    const localProducts = await db.products.toArray()
+    const unsyncedProductIds = new Set(
+      localProducts
+        .filter((r) => r.isSynced !== true && r.id != null)
+        .map((r) => String(r.id))
+    )
+    const localCustomers = await db.customers.toArray()
+    const unsyncedCustomerIds = new Set(
+      localCustomers
+        .filter((r) => r.isSynced !== true && r.id != null)
+        .map((r) => String(r.id))
+    )
+    const localPurchases = await db.purchases.toArray()
+    const unsyncedPurchaseIds = new Set(
+      localPurchases
+        .filter((r) => r.isSynced !== true && r.id != null)
+        .map((r) => String(r.id))
+    )
+    const localSales = await db.sales.toArray()
+    const unsyncedSaleIds = new Set(
+      localSales
+        .filter((r) => r.isSynced !== true && r.id != null)
+        .map((r) => String(r.id))
+    )
+    const localSaleItems = await db.sale_items.toArray()
+    const unsyncedSaleItemIds = new Set(
+      localSaleItems
+        .filter((r) => r.isSynced !== true && r.id != null)
+        .map((r) => String(r.id))
+    )
+    const localCollections = await db.collections.toArray()
+    const unsyncedCollectionIds = new Set(
+      localCollections
+        .filter((r) => r.isSynced !== true && r.id != null)
+        .map((r) => String(r.id))
+    )
+    const localSettings = await db.distributor_settings.toArray()
+    const unsyncedSettingIds = new Set(
+      localSettings
+        .filter((r) => r.isSynced !== true && r.id != null)
+        .map((r) => String(r.id))
+    )
+    const localDamages = await db.damages.toArray()
+    const unsyncedDamageIds = new Set(
+      localDamages
+        .filter((r) => r.isSynced !== true && r.id != null)
+        .map((r) => String(r.id))
+    )
+    const localPurchaseReturns = await db.purchase_returns.toArray()
+    const unsyncedPurchaseReturnIds = new Set(
+      localPurchaseReturns
+        .filter((r) => r.isSynced !== true && r.id != null)
+        .map((r) => String(r.id))
+    )
+    const localSalesReturns = await db.sales_returns.toArray()
+    const unsyncedSalesReturnIds = new Set(
+      localSalesReturns
+        .filter((r) => r.isSynced !== true && r.id != null)
+        .map((r) => String(r.id))
+    )
+
+    // Helper: filter out rows whose id is in the unsynced set.
+    // Also logs how many rows were skipped so the user knows.
+    function filterProtected(
+      rows: any[] | undefined,
+      unsyncedIds: Set<string>,
+      tableName: string
+    ): any[] {
+      if (!rows || rows.length === 0) return []
+      const safe = rows.filter((r) => {
+        const rid = String(r.id ?? '')
+        return !unsyncedIds.has(rid)
+      })
+      const skipped = rows.length - safe.length
+      if (skipped > 0) {
+        console.log(
+          `[pullFromServer] ${tableName}: skipped ${skipped} row(s) with unsynced local edits (protected from overwrite)`
+        )
+      }
+      return safe
+    }
+
+    // ---- Merge into local IndexedDB (filtered) ----
     // We use `bulkPut` (not `bulkAdd`) so that if a record with the same `id`
     // already exists (e.g. from a previous partial pull), it gets overwritten
-    // with the latest server data.
+    // with the latest server data — but ONLY if it's not in the unsynced set.
 
-    if (data.products?.length) {
-      await db.products.bulkPut(data.products)
-      counts.products = data.products.length
+    const safeProducts = filterProtected(data.products, unsyncedProductIds, 'products')
+    const safeCustomers = filterProtected(data.customers, unsyncedCustomerIds, 'customers')
+    const safePurchases = filterProtected(data.purchases, unsyncedPurchaseIds, 'purchases')
+    const safeSales = filterProtected(data.sales, unsyncedSaleIds, 'sales')
+    const safeSaleItems = filterProtected(data.sale_items, unsyncedSaleItemIds, 'sale_items')
+    const safeCollections = filterProtected(data.collections, unsyncedCollectionIds, 'collections')
+    const safeSettings = filterProtected(data.distributor_settings, unsyncedSettingIds, 'distributor_settings')
+    const safeDamages = filterProtected(data.damages, unsyncedDamageIds, 'damages')
+    const safePurchaseReturns = filterProtected(data.purchase_returns, unsyncedPurchaseReturnIds, 'purchase_returns')
+    const safeSalesReturns = filterProtected(data.sales_returns, unsyncedSalesReturnIds, 'sales_returns')
+
+    if (safeProducts.length) {
+      await db.products.bulkPut(safeProducts)
+      counts.products = safeProducts.length
     }
-    if (data.customers?.length) {
-      await db.customers.bulkPut(data.customers)
-      counts.customers = data.customers.length
+    if (safeCustomers.length) {
+      await db.customers.bulkPut(safeCustomers)
+      counts.customers = safeCustomers.length
     }
-    if (data.purchases?.length) {
-      await db.purchases.bulkPut(data.purchases)
-      counts.purchases = data.purchases.length
+    if (safePurchases.length) {
+      await db.purchases.bulkPut(safePurchases)
+      counts.purchases = safePurchases.length
     }
-    if (data.sales?.length) {
-      await db.sales.bulkPut(data.sales)
-      counts.sales = data.sales.length
+    if (safeSales.length) {
+      await db.sales.bulkPut(safeSales)
+      counts.sales = safeSales.length
     }
-    if (data.sale_items?.length) {
-      await db.sale_items.bulkPut(data.sale_items)
-      counts.sale_items = data.sale_items.length
+    if (safeSaleItems.length) {
+      await db.sale_items.bulkPut(safeSaleItems)
+      counts.sale_items = safeSaleItems.length
     }
-    if (data.collections?.length) {
-      await db.collections.bulkPut(data.collections)
-      counts.collections = data.collections.length
+    if (safeCollections.length) {
+      await db.collections.bulkPut(safeCollections)
+      counts.collections = safeCollections.length
     }
-    if (data.distributor_settings?.length) {
-      await db.distributor_settings.bulkPut(data.distributor_settings)
-      counts.distributor_settings = data.distributor_settings.length
+    if (safeSettings.length) {
+      await db.distributor_settings.bulkPut(safeSettings)
+      counts.distributor_settings = safeSettings.length
     }
-    if (data.damages?.length) {
-      await db.damages.bulkPut(data.damages)
-      counts.damages = data.damages.length
+    if (safeDamages.length) {
+      await db.damages.bulkPut(safeDamages)
+      counts.damages = safeDamages.length
     }
-    if (data.purchase_returns?.length) {
-      await db.purchase_returns.bulkPut(data.purchase_returns)
-      counts.purchase_returns = data.purchase_returns.length
+    if (safePurchaseReturns.length) {
+      await db.purchase_returns.bulkPut(safePurchaseReturns)
+      counts.purchase_returns = safePurchaseReturns.length
     }
-    if (data.sales_returns?.length) {
-      await db.sales_returns.bulkPut(data.sales_returns)
-      counts.sales_returns = data.sales_returns.length
+    if (safeSalesReturns.length) {
+      await db.sales_returns.bulkPut(safeSalesReturns)
+      counts.sales_returns = safeSalesReturns.length
     }
 
     // ---- Mark the DB as seeded so seedIfEmpty() never runs ----
@@ -631,6 +800,32 @@ export async function pullFromServer(): Promise<PullResult> {
 // ----------------------------------------------------------------------------
 // Helpers
 // ----------------------------------------------------------------------------
+
+/**
+ * Read the lastPullAt timestamp from the meta table. Used by the boot
+ * sequence to decide whether to re-pull on reopen (if stale > 5 min).
+ * Returns null if never pulled.
+ */
+export async function getLastPullAt(): Promise<string | null> {
+  try {
+    const row = await db.meta.get('lastPullAt')
+    return (row?.value as string) ?? null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Check if the local data is "stale" — i.e. the last pull was more than
+ * `maxAgeMs` ago (default 5 minutes). Used by the boot sequence to decide
+ * whether to trigger a background pull when the app reopens.
+ */
+export async function isDataStale(maxAgeMs: number = 5 * 60 * 1000): Promise<boolean> {
+  const lastPull = await getLastPullAt()
+  if (!lastPull) return true // never pulled → stale
+  const age = Date.now() - new Date(lastPull).getTime()
+  return age > maxAgeMs
+}
 
 function emptyCounts(): Record<EntityName, number> {
   return {

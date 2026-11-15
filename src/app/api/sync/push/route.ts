@@ -168,6 +168,9 @@ async function upsertProduct(rec: any): Promise<number> {
     outerUnit: str(rec.outer_unit, 'Bag'),
     conversionFactor: num(rec.conversion_factor, 1),
     packSize: nullableStr(rec.pack_size),
+    // Loose Product flag — defaults to false for backward compat.
+    isLoose: Boolean(rec.is_loose ?? false),
+    isDeleted: Boolean(rec.is_deleted ?? false),
     purchaseRatePerOuterUnit: num(rec.purchase_rate_per_outer_unit ?? rec.purchase_rate),
     purchaseRatePerPiece: num(rec.purchase_rate_per_piece ?? rec.purchase_rate_per_pcs),
     sellingRatePerPiece: num(rec.selling_rate_per_piece ?? rec.sales_rate_per_pcs),
@@ -200,6 +203,7 @@ async function upsertCustomer(rec: any): Promise<number> {
     gstin: nullableStr(rec.gstin),
     openingBalance: num(rec.opening_balance),
     billNumber: nullableStr(rec.bill_number),
+    isDeleted: Boolean(rec.is_deleted ?? false),
     createdAt: dateOrNow(rec.created_at),
     syncedAt: new Date(),
   }
@@ -234,6 +238,7 @@ async function upsertPurchase(rec: any): Promise<number> {
     totalAmount: num(rec.total_amount),
     mfgDate: nullableIsoDateOnly(rec.mfg_date),
     expiryDate: nullableIsoDateOnly(rec.expiry_date),
+    isDeleted: Boolean(rec.is_deleted ?? false),
     createdAt: dateOrNow(rec.created_at),
     syncedAt: new Date(),
   }
@@ -261,6 +266,7 @@ async function upsertSale(rec: any): Promise<number> {
     totalProfit: num(rec.total_profit),
     totalMarginPercent: num(rec.total_margin_percent),
     paidAmount: num(rec.paid_amount),
+    isDeleted: Boolean(rec.is_deleted ?? false),
     createdAt: dateOrNow(rec.created_at),
     syncedAt: new Date(),
   }
@@ -291,6 +297,7 @@ async function upsertSaleItem(rec: any): Promise<number> {
     purchaseRate: num(rec.purchase_rate),
     itemProfit: num(rec.item_profit),
     itemMarginPercent: num(rec.item_margin_percent),
+    isDeleted: Boolean(rec.is_deleted ?? false),
     syncedAt: new Date(),
   }
   await db.saleItem.upsert({
@@ -388,6 +395,17 @@ async function upsertDamage(rec: any): Promise<number> {
     customerId:
       rec.damage_source === 'store' && rec.customer_id != null
         ? bigInt(rec.customer_id)
+        : null,
+    // Task 2 — Bill-wise damage allocation. sale_id + against_invoice_no
+    // only present when source = 'store' AND the user attributed the damage
+    // to a specific bill. Both nullable → null for godown / unattributed.
+    saleId:
+      rec.damage_source === 'store' && rec.sale_id != null
+        ? bigInt(rec.sale_id)
+        : null,
+    againstInvoiceNo:
+      rec.damage_source === 'store' && rec.against_invoice_no != null
+        ? nullableStr(rec.against_invoice_no)
         : null,
     createdAt: dateOrNow(rec.created_at),
     syncedAt: new Date(),

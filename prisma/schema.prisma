@@ -39,6 +39,12 @@ model Product {
   outerUnit                     String   @map("outer_unit")
   conversionFactor             Float    @map("conversion_factor")
   packSize                      String?  @map("pack_size")
+  // Loose Product flag — when true, the product is sold by weight (Kg/Gm)
+  // instead of packaged units (Bag/Peti). conversion_factor is forced to 1
+  // and outer_unit is forced to base_unit so the pricing math stays identical
+  // (per-piece == per-outer when cf=1). Defaults to false → all existing
+  // packaged products remain unchanged.
+  isLoose                       Boolean  @default(false) @map("is_loose")
   purchaseRatePerOuterUnit      Float    @map("purchase_rate_per_outer_unit")
   purchaseRatePerPiece          Float    @map("purchase_rate_per_piece")
   sellingRatePerPiece           Float    @map("selling_rate_per_piece")
@@ -49,6 +55,10 @@ model Product {
   salesRatePerPcs               Float?   @map("sales_rate_per_pcs")
   gstPercent                    Float    @map("gst_percent")
   openingStockPcs               Float    @map("opening_stock_pcs")
+  // Soft Delete (Recycle Bin) — when true, the row is hidden from the main UI
+  // and moved to the Recycle Bin. Restore sets it back to false. Defaults to
+  // false → all existing rows remain visible.
+  isDeleted                     Boolean  @default(false) @map("is_deleted")
   createdAt                     DateTime @map("created_at")
   syncedAt                      DateTime? @map("synced_at")
   @@map("products")
@@ -68,6 +78,7 @@ model Customer {
   gstin           String?
   openingBalance  Float    @map("opening_balance")
   billNumber      String?  @map("bill_number")
+  isDeleted       Boolean  @default(false) @map("is_deleted")
   createdAt       DateTime @map("created_at")
   syncedAt        DateTime? @map("synced_at")
   @@map("customers")
@@ -99,6 +110,7 @@ model Purchase {
   totalAmount     Float    @map("total_amount")
   mfgDate         String?  @map("mfg_date")
   expiryDate      String?  @map("expiry_date")
+  isDeleted       Boolean  @default(false) @map("is_deleted")
   createdAt       DateTime @map("created_at")
   syncedAt        DateTime? @map("synced_at")
   @@map("purchases")
@@ -123,6 +135,7 @@ model Sale {
   totalProfit         Float    @map("total_profit")
   totalMarginPercent  Float    @map("total_margin_percent")
   paidAmount          Float    @map("paid_amount")
+  isDeleted           Boolean  @default(false) @map("is_deleted")
   createdAt           DateTime @map("created_at")
   syncedAt            DateTime? @map("synced_at")
   @@map("sales")
@@ -150,6 +163,7 @@ model SaleItem {
   purchaseRate        Float    @map("purchase_rate")
   itemProfit          Float    @map("item_profit")
   itemMarginPercent   Float    @map("item_margin_percent")
+  isDeleted           Boolean  @default(false) @map("is_deleted")
   createdAt           DateTime @default(now()) @map("created_at")
   syncedAt            DateTime? @map("synced_at")
   @@map("sale_items")
@@ -227,6 +241,12 @@ model Damage {
   // godown damages. Nullable + optional so old rows and old clients remain
   // compatible without a data migration.
   customerId      BigInt?  @map("customer_id")
+  // Task 2 — Bill-wise damage allocation. When a store-return damage is
+  // attributed to a specific sale/invoice, the damage amount is deducted
+  // from that bill's "Net Payable" in the Collection screen (Tally-style
+  // adjustment). Both nullable so existing damage records are unaffected.
+  saleId          BigInt?  @map("sale_id")
+  againstInvoiceNo String? @map("against_invoice_no")
   createdAt       DateTime @map("created_at")
   syncedAt        DateTime? @map("synced_at")
   @@map("damages")

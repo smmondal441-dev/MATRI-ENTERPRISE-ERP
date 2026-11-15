@@ -99,8 +99,9 @@ export function Collections() {
   const overAllocated = allocatedTotal > amount + 0.001 // float epsilon
 
   // ---- Auto-allocate FIFO helper ----
-  // Fills allocations oldest-bill-first until `amount` is exhausted. Useful
-  // for the common case where the user just wants to clear oldest dues.
+  // Fills allocations oldest-bill-first until `amount` is exhausted. Uses
+  // net_payable (total - paid - damage_adjustment) so damage-adjusted bills
+  // get the correct reduced allocation (Task 2 — damage-aware collection).
   const autoAllocateFifo = () => {
     if (!billDues || billDues.length === 0) {
       toast({
@@ -115,7 +116,9 @@ export function Collections() {
     for (const b of billDues) {
       if (remaining <= 0) break
       const sid = String(b.sale.id)
-      const give = Math.min(remaining, b.remaining_due)
+      // Task 2 — allocate against net_payable (after damage deduction),
+      // NOT remaining_due (which doesn't subtract damage).
+      const give = Math.min(remaining, b.net_payable)
       if (give > 0) {
         next[sid] = Number(give.toFixed(2))
         remaining -= give
@@ -763,7 +766,10 @@ function BillAllocationTable({
               <TableHead className="text-[10px]">Date</TableHead>
               <TableHead className="text-right text-[10px]">Total</TableHead>
               <TableHead className="text-right text-[10px]">Paid</TableHead>
-              <TableHead className="text-right text-[10px]">Due</TableHead>
+              {/* Task 2 — Damage adjustment column */}
+              <TableHead className="text-right text-[10px]">Damage Adj.</TableHead>
+              {/* Task 2 — Net Payable = Total - Paid - Damage (the amount to allocate) */}
+              <TableHead className="text-right text-[10px]">Net Payable</TableHead>
               <TableHead className="text-right text-[10px]">Allocate ₹</TableHead>
             </TableRow>
           </TableHeader>
@@ -771,8 +777,9 @@ function BillAllocationTable({
             {billDues.map((b) => {
               const sid = String(b.sale.id)
               const alloc = allocations[sid] ?? 0
-              const remainingAfter = b.remaining_due - alloc
-              const overBill = alloc > b.remaining_due + 0.001
+              // Task 2 — validation now uses net_payable (after damage deduction).
+              const remainingAfter = b.net_payable - alloc
+              const overBill = alloc > b.net_payable + 0.001
               return (
                 <TableRow key={sid}>
                   <TableCell className="font-mono text-[10px] font-semibold">
@@ -787,15 +794,27 @@ function BillAllocationTable({
                   <TableCell className="text-right text-[10px] text-emerald-700">
                     {b.paid_amount > 0 ? formatINR(b.paid_amount) : '—'}
                   </TableCell>
+                  {/* Task 2 — Damage adjustment (red, shown only if > 0) */}
+                  <TableCell className="text-right text-[10px]">
+                    {b.damage_amount > 0 ? (
+                      <span className="font-semibold text-red-600">
+                        −{formatINR(b.damage_amount)}
+                      </span>
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
+                    )}
+                  </TableCell>
+                  {/* Task 2 — Net Payable (the headline number for allocation) */}
                   <TableCell className="text-right text-[10px]">
                     <span
                       className={
-                        b.remaining_due > 0
-                          ? 'font-semibold text-red-600'
+                        b.net_payable > 0
+                          ? 'font-semibold text-blue-700'
                           : 'text-emerald-600'
                       }
+                      title="Total − Paid − Damage Adjustment"
                     >
-                      {formatINR(b.remaining_due)}
+                      {formatINR(b.net_payable)}
                     </span>
                   </TableCell>
                   <TableCell className="text-right">
@@ -822,7 +841,7 @@ function BillAllocationTable({
                       }`}
                       title={
                         overBill
-                          ? `Exceeds remaining due of ${formatINR(b.remaining_due)}`
+                          ? `Exceeds net payable of ${formatINR(b.net_payable)}`
                           : `Remaining after allocation: ${formatINR(Math.max(0, remainingAfter))}`
                       }
                     />

@@ -141,8 +141,8 @@ export function Inventory() {
         'Damaged Store (Pcs)',
         'Purchase Returned (Pcs)',
         'Sales Returned (Pcs)',
-        'Closing (Pcs)',
-        'Closing (Bags)',
+        'Closing (Qty)',
+        'Closing (Outer)',
         'Stock Value (₹)',
       ],
       ...filtered.map((r) => [
@@ -282,8 +282,8 @@ export function Inventory() {
                     <TableHead className="text-right">Dmg Store (Pcs)</TableHead>
                     <TableHead className="text-right">Pur. Ret. (Pcs)</TableHead>
                     <TableHead className="text-right">Sales Ret. (Pcs)</TableHead>
-                    <TableHead className="text-right">Closing (Pcs)</TableHead>
-                    <TableHead className="text-right">Closing (Bags)</TableHead>
+                    <TableHead className="text-right">Closing (Qty)</TableHead>
+                    <TableHead className="text-right">Closing (Outer)</TableHead>
                     <TableHead className="text-right">Stock Value</TableHead>
                     {/* Upgrade 4 — MFG + Expiry columns */}
                     <TableHead>MFG Date</TableHead>

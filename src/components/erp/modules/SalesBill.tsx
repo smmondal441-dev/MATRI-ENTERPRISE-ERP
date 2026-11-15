@@ -56,6 +56,43 @@ interface CartLine {
   uid: string
   product: Product
   qtyPcs: number
+  // Loose-product billing unit (Kg or Gm). Only set when product.is_loose.
+  // The user enters qty in this unit; the cart math converts to the product's
+  // base_unit (e.g. 200 Gm → 0.2 Kg) before computing taxable amount.
+  billingUnit?: string
+}
+
+// Billing units available for loose products at POS. The product's base_unit
+// is always the source of truth for stock math; billingUnit is just the UI's
+// display/entry unit which gets converted to base_unit before computation.
+const LOOSE_BILLING_UNITS = ['Kg', 'Gm']
+
+/**
+ * Convert a qty entered in `billingUnit` to the product's base_unit.
+ * Only handles weight conversions (Kg ↔ Gm). For loose products where
+ * billingUnit === base_unit, returns qty unchanged.
+ */
+function toBaseUnit(qty: number, billingUnit: string, baseUnit: string): number {
+  if (billingUnit === baseUnit) return qty
+  // Gm → Kg
+  if (billingUnit === 'Gm' && baseUnit === 'Kg') return qty / 1000
+  // Kg → Gm
+  if (billingUnit === 'Kg' && baseUnit === 'Gm') return qty * 1000
+  return qty // fallback: no conversion
+}
+
+/**
+ * Inverse of toBaseUnit — convert a base_unit qty to the display/billing unit.
+ * Used when the user switches the billing unit dropdown (e.g. 2 Kg → 2000 Gm
+ * so the displayed qty represents the same physical quantity).
+ */
+function toDisplayUnit(baseQty: number, displayUnit: string, baseUnit: string): number {
+  if (displayUnit === baseUnit) return baseQty
+  // Kg base → Gm display
+  if (displayUnit === 'Gm' && baseUnit === 'Kg') return baseQty * 1000
+  // Gm base → Kg display
+  if (displayUnit === 'Kg' && baseUnit === 'Gm') return baseQty / 1000
+  return baseQty // fallback: no conversion
 }
 
 export function SalesBill() {
@@ -97,13 +134,22 @@ export function SalesBill() {
   const customer = (customers ?? []).find((c) => String(c.id) === customerId)
 
   // Per-item live computation — v4 per-piece pricing model + v6 manual GST.
+  // For loose products, the user-entered qty (in billingUnit) is converted to
+  // the product's base_unit (e.g. 200 Gm → 0.2 Kg) before computing the
+  // taxable amount. The stored quantity_pcs is always in base_unit.
   const computedItems: SaleDraftItem[] = useMemo(() => {
     return cart.map((line) => {
       const p = line.product
       const sellingRatePerPiece = getSellingRatePerPiece(p)
       const purchaseRatePerPiece = getPurchaseRatePerPiece(p)
       const profitPerPiece = sellingRatePerPiece - purchaseRatePerPiece
-      const taxable = sellingRatePerPiece * line.qtyPcs
+      // Loose: convert billingUnit qty → base_unit qty. Packaged: qtyPcs is
+      // already in base_unit (Pcs), no conversion needed.
+      const effectiveQty =
+        p.is_loose && line.billingUnit
+          ? toBaseUnit(line.qtyPcs, line.billingUnit, p.base_unit)
+          : line.qtyPcs
+      const taxable = sellingRatePerPiece * effectiveQty
 
       // v6 — GST resolution per line item:
       //   - If applyGst is false → gst_percent = 0, CGST = 0, SGST = 0
@@ -119,14 +165,14 @@ export function SalesBill() {
       const sgst = (taxable * (lineGstPercent / 2)) / 100
       const total = taxable + cgst + sgst
 
-      const itemProfit = profitPerPiece * line.qtyPcs
+      const itemProfit = profitPerPiece * effectiveQty
       const margin = total > 0 ? (itemProfit / total) * 100 : 0
       return {
         product_id: p.id!,
         product_name: p.name,
         product_sku: p.sku,
         hsn_code: p.hsn_code,
-        quantity_pcs: line.qtyPcs,
+        quantity_pcs: effectiveQty, // always in base_unit (Pcs or Kg)
         rate: sellingRatePerPiece,
         gst_percent: lineGstPercent,
         taxable_amount: taxable,
@@ -165,9 +211,17 @@ export function SalesBill() {
           String(l.product.id) === prodIdStr ? { ...l, qtyPcs: l.qtyPcs + 1 } : l
         )
       }
+      // Loose products default to billingUnit = product's base_unit (usually Kg).
+      // The user can switch to Gm via the cart dropdown if selling small qty.
+      const billingUnit = prod.is_loose ? (prod.base_unit || 'Kg') : undefined
       return [
         ...prev,
-        { uid: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), product: prod, qtyPcs: 1 },
+        {
+          uid: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+          product: prod,
+          qtyPcs: prod.is_loose ? 1 : 1, // start at 1 (Pcs or Kg)
+          billingUnit,
+        },
       ]
     })
   }
@@ -175,6 +229,23 @@ export function SalesBill() {
   const updateQty = (uid: string, qty: number) => {
     setCart((prev) =>
       prev.map((l) => (l.uid === uid ? { ...l, qtyPcs: Math.max(0, qty) } : l))
+    )
+  }
+
+  // Update the billing unit for a loose-product cart line. Converts the
+  // existing qty so the displayed value stays consistent (e.g. switching
+  // 2 Kg → 2000 Gm so the user sees the same physical quantity).
+  const updateBillingUnit = (uid: string, newUnit: string) => {
+    setCart((prev) =>
+      prev.map((l) => {
+        if (l.uid !== uid || !l.product.is_loose) return l
+        const oldUnit = l.billingUnit ?? l.product.base_unit
+        // Convert current qty from oldUnit → newUnit so the displayed value
+        // represents the same physical quantity.
+        const baseQty = toBaseUnit(l.qtyPcs, oldUnit, l.product.base_unit)
+        const newDisplayQty = toDisplayUnit(baseQty, newUnit, l.product.base_unit)
+        return { ...l, billingUnit: newUnit, qtyPcs: newDisplayQty }
+      })
     )
   }
 
@@ -355,10 +426,10 @@ export function SalesBill() {
                     <TableHeader>
                       <TableRow>
                         <TableHead>Product</TableHead>
-                        <TableHead className="text-right">Qty (Pcs)</TableHead>
-                        <TableHead className="text-right">Sell/Pcs</TableHead>
-                        <TableHead className="text-right">Buy/Pcs</TableHead>
-                        <TableHead className="text-right">Profit/Pcs</TableHead>
+                        <TableHead className="text-right">Qty</TableHead>
+                        <TableHead className="text-right">Sell</TableHead>
+                        <TableHead className="text-right">Buy</TableHead>
+                        <TableHead className="text-right">Profit/Unit</TableHead>
                         <TableHead className="text-right">GST%</TableHead>
                         <TableHead className="text-right">Taxable</TableHead>
                         <TableHead className="text-right">CGST</TableHead>
@@ -381,16 +452,43 @@ export function SalesBill() {
                               </div>
                             </TableCell>
                             <TableCell className="text-right">
-                              <Input
-                                type="number"
-                                min={0}
-                                value={line.qtyPcs}
-                                onChange={(e) => updateQty(line.uid, Number(e.target.value))}
-                                className="h-8 w-20 text-right text-xs"
-                              />
+                              {/* Loose products: qty input + billing-unit dropdown. */}
+                              {/* Packaged products: qty input only (Pcs). */}
+                              <div className="flex items-center justify-end gap-1">
+                                <Input
+                                  type="number"
+                                  min={0}
+                                  step={line.product.is_loose ? '0.001' : '1'}
+                                  value={line.qtyPcs}
+                                  onChange={(e) => updateQty(line.uid, Number(e.target.value))}
+                                  className="h-8 w-20 text-right text-xs"
+                                />
+                                {line.product.is_loose ? (
+                                  <Select
+                                    value={line.billingUnit ?? line.product.base_unit}
+                                    onValueChange={(v) => updateBillingUnit(line.uid, v)}
+                                  >
+                                    <SelectTrigger className="h-8 w-16 text-xs">
+                                      <SelectValue />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                      {LOOSE_BILLING_UNITS.map((u) => (
+                                        <SelectItem key={u} value={u}>
+                                          {u}
+                                        </SelectItem>
+                                      ))}
+                                    </SelectContent>
+                                  </Select>
+                                ) : (
+                                  <span className="text-xs text-muted-foreground">{line.product.base_unit}</span>
+                                )}
+                              </div>
                             </TableCell>
                             <TableCell className="text-right text-xs font-medium">
                               {formatINR(item.rate)}
+                              <div className="text-[10px] text-muted-foreground">
+                                /{line.product.base_unit}
+                              </div>
                             </TableCell>
                             <TableCell className="text-right text-xs text-muted-foreground">
                               {formatINR(item.purchase_rate)}
@@ -400,7 +498,11 @@ export function SalesBill() {
                                 {formatINR(profitPerPcs)}
                               </span>
                               <div className="text-[10px] text-muted-foreground">
-                                × {line.qtyPcs} Pcs
+                                {/* Loose: show qty in billingUnit + converted base qty. */}
+                                {/* Packaged: show qty in Pcs. */}
+                                {line.product.is_loose
+                                  ? `× ${line.qtyPcs} ${line.billingUnit ?? line.product.base_unit}`
+                                  : `× ${line.qtyPcs} ${line.product.base_unit}`}
                               </div>
                             </TableCell>
                             <TableCell className="text-right text-xs">

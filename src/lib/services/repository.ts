@@ -200,7 +200,11 @@ export function computeSalesRatePerPcs(
 
 export const ProductService = {
   async all(): Promise<Product[]> {
-    return db.products.orderBy('created_at').reverse().toArray()
+    return db.products
+      .orderBy('created_at')
+      .reverse()
+      .toArray()
+      .then(rows => rows.filter(r => !r.is_deleted))
   },
 
   async get(id: number): Promise<Product | undefined> {
@@ -222,7 +226,18 @@ export const ProductService = {
    * so older UI code continues to work after a DB read.
    */
   async create(p: Omit<Product, 'id' | 'created_at'>): Promise<number> {
-    const cf = Number(p.conversion_factor) || 1
+    // ---- Loose Product normalization ----
+    // When is_loose is true, force conversion_factor = 1 and outer_unit =
+    // base_unit so the pricing math stays consistent (per-piece == per-outer
+    // when cf=1). The UI hides Outer Unit + Conversion Factor inputs for loose
+    // products, but we enforce it here as a backend safety net.
+    const isLoose = Boolean(p.is_loose)
+    const baseUnit = isLoose
+      ? String(p.base_unit || 'Kg')
+      : String(p.base_unit || 'Pcs')
+    const outerUnit = isLoose ? baseUnit : String(p.outer_unit || 'Bag')
+    const cf = isLoose ? 1 : Number(p.conversion_factor) || 1
+
     const purchaseRatePerOuterUnit =
       Number(p.purchase_rate_per_outer_unit ?? p.purchase_rate ?? 0) || 0
     const sellingRatePerPiece =
@@ -232,6 +247,9 @@ export const ProductService = {
 
     const payload: Product = {
       ...p,
+      is_loose: isLoose,
+      base_unit: baseUnit,
+      outer_unit: outerUnit,
       conversion_factor: cf,
       // v4 canonical fields
       purchase_rate_per_outer_unit: purchaseRatePerOuterUnit,
@@ -255,6 +273,19 @@ export const ProductService = {
 
   async update(id: number, p: Partial<Product>): Promise<number> {
     const patch: Partial<Product> = { ...p }
+    // ---- Loose Product normalization (mirror of create) ----
+    // If is_loose is being flipped on (or the product is already loose),
+    // force conversion_factor = 1 and outer_unit = base_unit.
+    const existing = await db.products.get(id)
+    const isLoose =
+      p.is_loose !== undefined ? Boolean(p.is_loose) : Boolean(existing?.is_loose)
+    if (isLoose) {
+      const baseUnit = String(p.base_unit ?? existing?.base_unit ?? 'Kg')
+      patch.is_loose = true
+      patch.base_unit = baseUnit
+      patch.outer_unit = baseUnit
+      patch.conversion_factor = 1
+    }
     // Recompute the auto-derived rate fields whenever any of the source
     // inputs (purchase_rate_per_outer_unit, selling_rate_per_piece,
     // conversion_factor) change.
@@ -267,8 +298,7 @@ export const ProductService = {
       p.conversion_factor !== undefined
 
     if (triggersRateRecompute) {
-      const existing = await db.products.get(id)
-      const cf = Number(p.conversion_factor ?? existing?.conversion_factor ?? 1) || 1
+      const cf = isLoose ? 1 : Number(p.conversion_factor ?? existing?.conversion_factor ?? 1) || 1
       // Resolve the two primary inputs (with fallback to existing/legacy values)
       const purchaseRatePerOuterUnit = Number(
         p.purchase_rate_per_outer_unit ??
@@ -319,10 +349,35 @@ export const ProductService = {
   },
 
   async remove(id: number): Promise<void> {
+    // Soft-delete: mark is_deleted=true instead of physically removing the
+    // row, so it can be restored from the Recycle Bin later. isSynced=false
+    // ensures the change propagates to PostgreSQL on the next sync push.
+    await db.products.update(id, {
+      is_deleted: true,
+      isSynced: false,
+      synced_at: null,
+    })
+    scheduleSync('products')
+  },
+
+  async restore(id: number): Promise<void> {
+    await db.products.update(id, {
+      is_deleted: false,
+      isSynced: false,
+      synced_at: null,
+    })
+    scheduleSync('products')
+  },
+
+  async listDeleted(): Promise<Product[]> {
+    return (await db.products.toArray()).filter(r => r.is_deleted === true)
+  },
+
+  async hardDelete(id: number): Promise<void> {
+    // Physically remove the row (no restore possible). Used by the Recycle
+    // Bin's "Delete forever" action.
     await db.products.delete(id)
-    // Note: deletion is not currently propagated to the PostgreSQL backend.
-    // Local-only delete is sufficient for now — the next sync will re-push
-    // the surviving records, and the deleted row will simply not appear.
+    scheduleSync('products')
   },
 
   async search(query: string): Promise<Product[]> {
@@ -345,7 +400,11 @@ export const ProductService = {
 
 export const CustomerService = {
   async all(): Promise<Customer[]> {
-    return db.customers.orderBy('created_at').reverse().toArray()
+    return db.customers
+      .orderBy('created_at')
+      .reverse()
+      .toArray()
+      .then(rows => rows.filter(r => !r.is_deleted))
   },
 
   async get(id: number): Promise<Customer | undefined> {
@@ -374,22 +433,113 @@ export const CustomerService = {
   },
 
   async remove(id: number): Promise<void> {
+    // Soft-delete: mark is_deleted=true; record preserved for Recycle Bin.
+    await db.customers.update(id, {
+      is_deleted: true,
+      isSynced: false,
+      synced_at: null,
+    })
+    scheduleSync('customers')
+  },
+
+  async restore(id: number): Promise<void> {
+    await db.customers.update(id, {
+      is_deleted: false,
+      isSynced: false,
+      synced_at: null,
+    })
+    scheduleSync('customers')
+  },
+
+  async listDeleted(): Promise<Customer[]> {
+    return (await db.customers.toArray()).filter(r => r.is_deleted === true)
+  },
+
+  async hardDelete(id: number): Promise<void> {
     await db.customers.delete(id)
+    scheduleSync('customers')
   },
 
   async nextCustomerId(): Promise<string> {
-    const count = await db.customers.count()
-    return `CUST-${String(count + 1).padStart(4, '0')}`
+    // ---- Bug fix: previously used db.customers.count() which returns the
+    // CURRENT row count, NOT the max ID ever assigned. If any customer was
+    // ever deleted (test cleanup, sync conflicts), count() returns a number
+    // LOWER than the highest CUST-XXXX suffix in the table — so the
+    // generator kept producing the same ID over and over (stuck at 233).
+    //
+    // Fix: fetch ALL customer_id strings, parse the numeric suffix via
+    // parseInt(), take Math.max(), then +1. Safe for deleted rows.
+    // Falls back to count+1 if no existing IDs are parseable.
+    const all = await db.customers.toArray()
+    let maxNum = 0
+    for (const c of all) {
+      const raw = c.customer_id ?? ''
+      // Strip any non-digit prefix (CUST-, CUST_, C- etc.) and parse the
+      // trailing digits. Handles both "CUST-0233" and bare "233".
+      const match = raw.match(/(\d+)\s*$/)
+      if (match) {
+        const n = parseInt(match[1], 10)
+        if (!isNaN(n) && n > maxNum) {
+          maxNum = n
+        }
+      }
+    }
+    // If no existing IDs were parseable (e.g. empty table), fall back to
+    // count()+1 so the first customer gets CUST-0001.
+    const next = maxNum > 0 ? maxNum + 1 : all.length + 1
+    return `CUST-${String(next).padStart(4, '0')}`
   },
 }
 
 // ----------------------------------------------------------------------------
 // Purchase services — writes purchase record + adjusts product stock
 // ----------------------------------------------------------------------------
+// Supports two creation paths:
+//   1. create(p)        — single-item purchase (legacy, kept for backward compat)
+//   2. createBatch(draft) — multi-item vendor invoice (Tally/SAP style):
+//      creates N Purchase rows sharing the same invoice header (bill_no, date,
+//      supplier_name, supplier_gstin) in one Dexie transaction. Each row has
+//      its own product/qty/rate/GST/mfg/expiry. Updates each product's purchase
+//      rate to the latest batch rate so POS profit calcs stay accurate.
+// ----------------------------------------------------------------------------
+
+// Multi-item purchase draft — the cart line for a single product within a
+// vendor invoice. The UI builds an array of these and passes them to
+// createBatch() along with the shared invoice header.
+export interface PurchaseDraftItem {
+  product_id: number
+  product_sku: string
+  product_name: string
+  hsn_code: string
+  bag_qty: number // 0 for loose products
+  pcs_qty: number // loose: this IS the qty in Kg/Gm; packaged: extra pcs
+  total_pcs: number // bag_qty * conversion_factor + pcs_qty
+  purchase_rate: number // per outer unit (or per Kg for loose)
+  gst_percent: number
+  taxable_amount: number
+  cgst: number
+  sgst: number
+  total_amount: number
+  mfg_date?: string
+  expiry_date?: string
+}
+
+// Shared invoice header + items — what createBatch receives.
+export interface PurchaseDraft {
+  bill_no: string
+  date: string
+  supplier_name: string
+  supplier_gstin?: string
+  items: PurchaseDraftItem[]
+}
 
 export const PurchaseService = {
   async all(): Promise<Purchase[]> {
-    return db.purchases.orderBy('created_at').reverse().toArray()
+    return db.purchases
+      .orderBy('created_at')
+      .reverse()
+      .toArray()
+      .then(rows => rows.filter(r => !r.is_deleted))
   },
 
   async create(p: Omit<Purchase, 'id' | 'created_at'>): Promise<number> {
@@ -420,9 +570,96 @@ export const PurchaseService = {
     return id
   },
 
+  /**
+   * Multi-item vendor invoice — creates N Purchase rows sharing the same
+   * invoice header (bill_no, date, supplier_name, supplier_gstin) in one
+   * atomic Dexie transaction. Each row has its own product/qty/rate/GST/mfg/
+   * expiry. For each item:
+   *   1. Creates a Purchase row (shared header + per-item details).
+   *   2. Bumps product.opening_stock_pcs += item.total_pcs.
+   *   3. Updates product.purchase_rate_per_outer_unit = item.purchase_rate
+   *      (latest batch rate wins — standard ERP behavior so POS profit
+   *      calculations use the updated rate).
+   *   4. Recomputes purchase_rate_per_piece = rate / conversion_factor.
+   *   5. Marks product isSynced=false.
+   *
+   * All rows + affected products are created/updated atomically — if any
+   * item fails, the entire batch rolls back (no partial invoice).
+   *
+   * Returns: array of created Purchase IDs (one per cart item).
+   */
+  async createBatch(draft: PurchaseDraft): Promise<number[]> {
+    const createdIds: number[] = []
+    const now = new Date().toISOString()
+    const normalizedDate = isoBusinessDate(draft.date)
+
+    await db.transaction(
+      'rw',
+      db.purchases,
+      db.products,
+      async () => {
+        for (const item of draft.items) {
+          // ---- 1. Create the Purchase row ----
+          const purchaseId = await db.purchases.add({
+            bill_no: draft.bill_no,
+            date: normalizedDate,
+            supplier_name: draft.supplier_name,
+            supplier_gstin: draft.supplier_gstin ?? undefined,
+            product_id: item.product_id,
+            product_sku: item.product_sku,
+            product_name: item.product_name,
+            hsn_code: item.hsn_code,
+            bag_qty: item.bag_qty,
+            pcs_qty: item.pcs_qty,
+            total_pcs: item.total_pcs,
+            purchase_rate: item.purchase_rate,
+            gst_percent: item.gst_percent,
+            taxable_amount: item.taxable_amount,
+            cgst: item.cgst,
+            sgst: item.sgst,
+            total_amount: item.total_amount,
+            mfg_date: isoNullableBusinessDate(item.mfg_date),
+            expiry_date: isoNullableBusinessDate(item.expiry_date),
+            created_at: now,
+            isSynced: false,
+            synced_at: null,
+          })
+          createdIds.push(purchaseId as number)
+
+          // ---- 2. Bump product stock + 3/4. Update purchase rate ----
+          const prod = await db.products.get(item.product_id)
+          if (prod) {
+            const cf = Number(prod.conversion_factor) || 1
+            const newPerPiece = cf > 0 ? item.purchase_rate / cf : item.purchase_rate
+            await db.products.update(item.product_id, {
+              opening_stock_pcs: prod.opening_stock_pcs + item.total_pcs,
+              // Latest batch rate wins — update the product master so future
+              // POS profit calculations use this batch's purchase rate.
+              purchase_rate_per_outer_unit: item.purchase_rate,
+              purchase_rate_per_piece: newPerPiece,
+              // Legacy aliases kept in sync
+              purchase_rate: item.purchase_rate,
+              purchase_rate_per_pcs: newPerPiece,
+              isSynced: false,
+              synced_at: null,
+            })
+          }
+        }
+      }
+    )
+    // Schedule sync once for the whole batch (single network round-trip).
+    scheduleSync('purchases')
+    scheduleSync('products')
+    return createdIds
+  },
+
   async remove(id: number): Promise<void> {
     const purchase = await db.purchases.get(id)
     if (!purchase) return
+    // Soft-delete: KEEP the stock-revert (the purchase is "leaving" the
+    // active ledger, so its total_pcs must come off the product's stock),
+    // but mark the row is_deleted=true instead of physically deleting it,
+    // so it can be restored from the Recycle Bin later.
     await db.transaction('rw', db.purchases, db.products, async () => {
       const prod = await db.products.get(purchase.product_id)
       if (prod) {
@@ -432,9 +669,47 @@ export const PurchaseService = {
           synced_at: null,
         })
       }
-      await db.purchases.delete(id)
+      await db.purchases.update(id, {
+        is_deleted: true,
+        isSynced: false,
+        synced_at: null,
+      })
     })
     scheduleSync('products')
+    scheduleSync('purchases')
+  },
+
+  async restore(id: number): Promise<void> {
+    const purchase = await db.purchases.get(id)
+    if (!purchase) return
+    // RE-APPLY stock: the purchase is returning to the active ledger, so
+    // add its total_pcs back to the product's opening_stock_pcs.
+    await db.transaction('rw', db.purchases, db.products, async () => {
+      const prod = await db.products.get(purchase.product_id)
+      if (prod) {
+        await db.products.update(purchase.product_id, {
+          opening_stock_pcs: prod.opening_stock_pcs + purchase.total_pcs,
+          isSynced: false,
+          synced_at: null,
+        })
+      }
+      await db.purchases.update(id, {
+        is_deleted: false,
+        isSynced: false,
+        synced_at: null,
+      })
+    })
+    scheduleSync('products')
+    scheduleSync('purchases')
+  },
+
+  async listDeleted(): Promise<Purchase[]> {
+    return (await db.purchases.toArray()).filter(r => r.is_deleted === true)
+  },
+
+  async hardDelete(id: number): Promise<void> {
+    await db.purchases.delete(id)
+    scheduleSync('purchases')
   },
 }
 
@@ -476,7 +751,11 @@ export interface SaleDraft {
 
 export const SaleService = {
   async all(): Promise<Sale[]> {
-    return db.sales.orderBy('created_at').reverse().toArray()
+    return db.sales
+      .orderBy('created_at')
+      .reverse()
+      .toArray()
+      .then(rows => rows.filter(r => !r.is_deleted))
   },
 
   async get(id: number): Promise<{ sale: Sale; items: SaleItem[] } | undefined> {
@@ -490,11 +769,16 @@ export const SaleService = {
       .where('sale_id')
       .equals(Number(id))
       .toArray()
+      .then(rows => rows.filter(si => !si.is_deleted))
     return { sale, items }
   },
 
   async itemsBySale(saleId: number): Promise<SaleItem[]> {
-    return db.sale_items.where('sale_id').equals(Number(saleId)).toArray()
+    return db.sale_items
+      .where('sale_id')
+      .equals(Number(saleId))
+      .toArray()
+      .then(rows => rows.filter(si => !si.is_deleted))
   },
 
   async create(draft: SaleDraft): Promise<number> {
@@ -651,12 +935,101 @@ export const SaleService = {
   },
 
   async nextInvoiceNo(prefix = 'INV'): Promise<string> {
-    const count = await db.sales.count()
+    // ---- Bug fix (same as nextCustomerId): use Math.max() over parsed
+    // invoice_no suffixes, NOT db.sales.count(). Deleted sales would
+    // otherwise cause the generator to reuse an already-assigned number.
     const year = new Date().getFullYear()
-    return `${prefix}-${year}-${String(count + 1).padStart(4, '0')}`
+    const all = await db.sales.toArray()
+    let maxNum = 0
+    for (const s of all) {
+      const raw = s.invoice_no ?? ''
+      // Match the LAST run of digits (e.g. "INV-2024-0023" → 23).
+      const match = raw.match(/(\d+)\s*$/)
+      if (match) {
+        const n = parseInt(match[1], 10)
+        if (!isNaN(n) && n > maxNum) {
+          maxNum = n
+        }
+      }
+    }
+    const next = maxNum > 0 ? maxNum + 1 : all.length + 1
+    return `${prefix}-${year}-${String(next).padStart(4, '0')}`
   },
 
   async remove(id: number): Promise<void> {
+    // Soft-delete: KEEP the existing child-deletion (now as a soft-delete via
+    // .modify) and APPLY stock-restore for every sale_item (the sale is
+    // "leaving" the active ledger, so its qty must go back to inventory).
+    // The sale row itself is marked is_deleted=true instead of physically
+    // deleted, so it can be restored from the Recycle Bin later.
+    await db.transaction('rw', db.sales, db.sale_items, db.products, async () => {
+      const items = await db.sale_items
+        .where('sale_id')
+        .equals(Number(id))
+        .toArray()
+      for (const it of items) {
+        const prod = await db.products.get(it.product_id)
+        if (prod) {
+          await db.products.update(it.product_id, {
+            opening_stock_pcs: prod.opening_stock_pcs + it.quantity_pcs,
+            isSynced: false,
+            synced_at: null,
+          })
+        }
+      }
+      await db.sale_items
+        .where('sale_id')
+        .equals(Number(id))
+        .modify({ is_deleted: true, isSynced: false, synced_at: null })
+      await db.sales.update(id, {
+        is_deleted: true,
+        isSynced: false,
+        synced_at: null,
+      })
+    })
+    scheduleSync('sales')
+    scheduleSync('products')
+  },
+
+  async restore(id: number): Promise<void> {
+    // RE-APPLY stock decrement for every sale_item (the sale is "returning"
+    // to the active ledger, so its qty must come off inventory again).
+    // Un-soft-delete the sale + its sale_items.
+    await db.transaction('rw', db.sales, db.sale_items, db.products, async () => {
+      const items = await db.sale_items
+        .where('sale_id')
+        .equals(Number(id))
+        .toArray()
+      for (const it of items) {
+        const prod = await db.products.get(it.product_id)
+        if (prod) {
+          await db.products.update(it.product_id, {
+            opening_stock_pcs: Math.max(0, prod.opening_stock_pcs - it.quantity_pcs),
+            isSynced: false,
+            synced_at: null,
+          })
+        }
+      }
+      await db.sale_items
+        .where('sale_id')
+        .equals(Number(id))
+        .modify({ is_deleted: false, isSynced: false, synced_at: null })
+      await db.sales.update(id, {
+        is_deleted: false,
+        isSynced: false,
+        synced_at: null,
+      })
+    })
+    scheduleSync('sales')
+    scheduleSync('products')
+  },
+
+  async listDeleted(): Promise<Sale[]> {
+    return (await db.sales.toArray()).filter(r => r.is_deleted === true)
+  },
+
+  async hardDelete(id: number): Promise<void> {
+    // Physically delete the sale + its sale_items (no restore possible).
     await db.transaction('rw', db.sales, db.sale_items, async () => {
       await db.sale_items.where('sale_id').equals(Number(id)).delete()
       await db.sales.delete(id)
@@ -756,9 +1129,13 @@ function daysUntil(target: Date): number {
 
 export const InventoryService = {
   async all(): Promise<InventoryRow[]> {
-    const products = await db.products.toArray()
-    const purchases = await db.purchases.toArray()
-    const saleItems = await db.sale_items.toArray()
+    // Soft-delete aware: exclude deleted products/purchases/sale_items so
+    // the derived stock ledger only reflects active records. Damages,
+    // purchase_returns and sales_returns are not part of this soft-delete
+    // task (their interfaces don't carry is_deleted) — left untouched.
+    const products = (await db.products.toArray()).filter(p => !p.is_deleted)
+    const purchases = (await db.purchases.toArray()).filter(pu => !pu.is_deleted)
+    const saleItems = (await db.sale_items.toArray()).filter(si => !si.is_deleted)
     const damages = await db.damages.toArray()
     const purchaseReturns = await db.purchase_returns.toArray()
     const salesReturns = await db.sales_returns.toArray()
@@ -895,9 +1272,15 @@ export interface CustomerDues {
 
 export const DuesService = {
   async all(): Promise<CustomerDues[]> {
-    const customers = await db.customers.toArray()
-    const sales = await db.sales.toArray()
-    const collections = await db.collections.toArray()
+    // Soft-delete aware: customers and sales are filtered to exclude
+    // is_deleted=true rows. Collection doesn't yet have is_deleted (not
+    // part of this soft-delete task) — filtered defensively with a cast so
+    // future schema changes don't leak deleted collections into dues.
+    const customers = (await db.customers.toArray()).filter(c => !c.is_deleted)
+    const sales = (await db.sales.toArray()).filter(s => !s.is_deleted)
+    const collections = (await db.collections.toArray()).filter(
+      col => !(col as any).is_deleted
+    )
     const salesReturns = await db.sales_returns.toArray()
     return customers.map((c) => {
       const cid = String(c.id)
@@ -957,6 +1340,16 @@ export interface BillDue {
   invoice_no: string // live from sale.invoice_no (or allocation snapshot if sale deleted)
   total_amount: number
   paid_amount: number // sum of allocations across all collections
+  // Task 2 — Damage-aware bill-wise collection.
+  // Sum of damage.expense_value across all Damage rows where sale_id matches
+  // this sale (store-return damages attributed to this bill). Subtracted from
+  // remaining_due to produce net_payable.
+  damage_amount: number
+  // Net Payable = total_amount - paid_amount - damage_amount.
+  // This is what the user should allocate against in the Collection screen.
+  net_payable: number
+  // remaining_due = total_amount - paid_amount (does NOT subtract damage).
+  // Kept for backward compat — the Collection UI now uses net_payable.
   remaining_due: number
 }
 
@@ -973,16 +1366,35 @@ export const BillDuesService = {
     const cid = String(customerId)
     const sales = await db.sales.toArray()
     const collections = await db.collections.toArray()
+    // Task 2 — also load damages so we can subtract store-return damage
+    // amounts attributed to each bill via sale_id.
+    const damages = await db.damages.toArray()
 
-    // ---- Credit sales for this customer ----
+    // ---- Credit sales for this customer (exclude soft-deleted) ----
     const creditSales = sales.filter(
       (s) =>
-        String(s.customer_id) === cid && s.payment_mode === 'Credit'
+        String(s.customer_id) === cid &&
+        s.payment_mode === 'Credit' &&
+        !s.is_deleted
     )
 
     // ---- All collections for this customer (we'll walk their allocations) ----
+    // Collection doesn't yet have is_deleted (not part of this soft-delete
+    // task) — filter defensively with a cast so future schema changes don't
+    // leak deleted collections into bill-wise dues.
     const custCollections = collections.filter(
-      (c) => String(c.customer_id) === cid
+      (c) => String(c.customer_id) === cid && !(c as any).is_deleted
+    )
+
+    // ---- All damages for this customer (we'll sum expense_value by sale_id) ----
+    // Only store-damages attributed to a specific sale are subtracted from
+    // that bill's net payable. Godown damages (no sale_id) are not bill-linked.
+    // Damage doesn't yet have is_deleted — filtered defensively with a cast.
+    const custDamages = damages.filter(
+      (d) =>
+        String(d.customer_id) === cid &&
+        d.sale_id != null &&
+        !(d as any).is_deleted
     )
 
     // ---- Build sale-id → paid-amount map by walking allocations ----
@@ -996,24 +1408,39 @@ export const BillDuesService = {
       }
     }
 
+    // ---- Build sale-id → damage-amount map by walking damages ----
+    // Multiple damages may be attributed to the same sale; we sum them all.
+    const damageMap = new Map<string, number>()
+    for (const dmg of custDamages) {
+      const sid = String(dmg.sale_id)
+      damageMap.set(sid, (damageMap.get(sid) ?? 0) + (dmg.expense_value ?? 0))
+    }
+
     // ---- Build the BillDue rows ----
     const rows: BillDue[] = creditSales.map((sale) => {
       const sid = String(sale.id)
       const paid = paidMap.get(sid) ?? 0
+      const damage = damageMap.get(sid) ?? 0
       const remaining = sale.total_amount - paid
+      // Net Payable = total - paid - damage (Tally-style "Against Reference"
+      // adjustment). Floor at 0 so a bill can't go negative.
+      const netPayable = Math.max(0, sale.total_amount - paid - damage)
       return {
         sale,
         invoice_no: sale.invoice_no,
         total_amount: sale.total_amount,
         paid_amount: paid,
+        damage_amount: damage,
+        net_payable: netPayable,
         remaining_due: remaining,
       }
     })
 
-    // ---- Filter out fully-paid bills unless includePaid ----
+    // ---- Filter out fully-settled bills unless includePaid ----
+    // A bill is "fully settled" when net_payable <= 0 (paid + damage >= total).
     return includePaid
       ? rows
-      : rows.filter((r) => r.remaining_due > 0.001) // tiny epsilon for float drift
+      : rows.filter((r) => r.net_payable > 0.001) // tiny epsilon for float drift
   },
 
   /**
@@ -1107,6 +1534,12 @@ export const DamageService = {
         // customer_id / customer_name only meaningful when source = 'store'
         customer_id: source === 'store' ? d.customer_id : undefined,
         customer_name: source === 'store' ? d.customer_name : undefined,
+        // Task 2 — Bill-wise damage allocation. sale_id + against_invoice_no
+        // only meaningful when source = 'store' AND the user attributed the
+        // damage to a specific bill. Both nullable → undefined for godown
+        // damages or unattributed store damages.
+        sale_id: source === 'store' ? d.sale_id : undefined,
+        against_invoice_no: source === 'store' ? d.against_invoice_no : undefined,
         expense_value: expenseValue,
         created_at: new Date().toISOString(),
         isSynced: false,
@@ -1171,9 +1604,20 @@ export const PurchaseReturnService = {
   },
 
   async nextReturnNo(): Promise<string> {
-    const count = await db.purchase_returns.count()
+    // ---- Bug fix (same as nextCustomerId): Math.max() over parsed suffixes.
     const year = new Date().getFullYear()
-    return `PR-${year}-${String(count + 1).padStart(4, '0')}`
+    const all = await db.purchase_returns.toArray()
+    let maxNum = 0
+    for (const r of all) {
+      const raw = r.return_no ?? ''
+      const match = raw.match(/(\d+)\s*$/)
+      if (match) {
+        const n = parseInt(match[1], 10)
+        if (!isNaN(n) && n > maxNum) maxNum = n
+      }
+    }
+    const next = maxNum > 0 ? maxNum + 1 : all.length + 1
+    return `PR-${year}-${String(next).padStart(4, '0')}`
   },
 
   async create(r: Omit<PurchaseReturn, 'id' | 'created_at' | 'return_no'>): Promise<number> {
@@ -1233,9 +1677,20 @@ export const SalesReturnService = {
   },
 
   async nextReturnNo(): Promise<string> {
-    const count = await db.sales_returns.count()
+    // ---- Bug fix (same as nextCustomerId): Math.max() over parsed suffixes.
     const year = new Date().getFullYear()
-    return `SR-${year}-${String(count + 1).padStart(4, '0')}`
+    const all = await db.sales_returns.toArray()
+    let maxNum = 0
+    for (const r of all) {
+      const raw = r.return_no ?? ''
+      const match = raw.match(/(\d+)\s*$/)
+      if (match) {
+        const n = parseInt(match[1], 10)
+        if (!isNaN(n) && n > maxNum) maxNum = n
+      }
+    }
+    const next = maxNum > 0 ? maxNum + 1 : all.length + 1
+    return `SR-${year}-${String(next).padStart(4, '0')}`
   },
 
   async create(r: Omit<SalesReturn, 'id' | 'created_at' | 'return_no'>): Promise<number> {

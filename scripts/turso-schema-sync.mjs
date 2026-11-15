@@ -107,6 +107,10 @@ const EXPECTED_SCHEMA = {
     { name: 'sales_rate_per_pcs', sqlType: 'REAL', nullable: true },
     { name: 'gst_percent', sqlType: 'REAL', nullable: false },
     { name: 'opening_stock_pcs', sqlType: 'REAL', nullable: false },
+    // ★ Loose Product flag — defaults to 0 (false) for backward compat.
+    { name: 'is_loose', sqlType: 'INTEGER', nullable: false, default: '0' },
+    // ★ Soft Delete (Recycle Bin) — defaults to 0 (false) for backward compat.
+    { name: 'is_deleted', sqlType: 'INTEGER', nullable: false, default: '0' },
     { name: 'created_at', sqlType: 'TEXT', nullable: false },
     { name: 'synced_at', sqlType: 'TEXT', nullable: true },
   ],
@@ -120,6 +124,7 @@ const EXPECTED_SCHEMA = {
     { name: 'gstin', sqlType: 'TEXT', nullable: true },
     { name: 'opening_balance', sqlType: 'REAL', nullable: false },
     { name: 'bill_number', sqlType: 'TEXT', nullable: true },
+    { name: 'is_deleted', sqlType: 'INTEGER', nullable: false, default: '0' },
     { name: 'created_at', sqlType: 'TEXT', nullable: false },
     { name: 'synced_at', sqlType: 'TEXT', nullable: true },
   ],
@@ -145,6 +150,7 @@ const EXPECTED_SCHEMA = {
     { name: 'total_amount', sqlType: 'REAL', nullable: false },
     { name: 'mfg_date', sqlType: 'TEXT', nullable: true },
     { name: 'expiry_date', sqlType: 'TEXT', nullable: true },
+    { name: 'is_deleted', sqlType: 'INTEGER', nullable: false, default: '0' },
     { name: 'created_at', sqlType: 'TEXT', nullable: false },
     { name: 'synced_at', sqlType: 'TEXT', nullable: true },
   ],
@@ -163,6 +169,7 @@ const EXPECTED_SCHEMA = {
     { name: 'total_profit', sqlType: 'REAL', nullable: false },
     { name: 'total_margin_percent', sqlType: 'REAL', nullable: false },
     { name: 'paid_amount', sqlType: 'REAL', nullable: false },
+    { name: 'is_deleted', sqlType: 'INTEGER', nullable: false, default: '0' },
     { name: 'created_at', sqlType: 'TEXT', nullable: false },
     { name: 'synced_at', sqlType: 'TEXT', nullable: true },
   ],
@@ -184,6 +191,7 @@ const EXPECTED_SCHEMA = {
     { name: 'purchase_rate', sqlType: 'REAL', nullable: false },
     { name: 'item_profit', sqlType: 'REAL', nullable: false },
     { name: 'item_margin_percent', sqlType: 'REAL', nullable: false },
+    { name: 'is_deleted', sqlType: 'INTEGER', nullable: false, default: '0' },
     { name: 'created_at', sqlType: 'TEXT', nullable: false },
     { name: 'synced_at', sqlType: 'TEXT', nullable: true },
   ],
@@ -234,6 +242,9 @@ const EXPECTED_SCHEMA = {
     { name: 'damage_source', sqlType: 'TEXT', nullable: false, default: "'godown'" },
     // ★ NEW COLUMN — Optional customer reference for store-damages
     { name: 'customer_id', sqlType: 'INTEGER', nullable: true },
+    // ★ Task 2 NEW COLUMN — Bill-wise damage allocation (sale_id + against_invoice_no)
+    { name: 'sale_id', sqlType: 'INTEGER', nullable: true },
+    { name: 'against_invoice_no', sqlType: 'TEXT', nullable: true },
     { name: 'created_at', sqlType: 'TEXT', nullable: false },
     { name: 'synced_at', sqlType: 'TEXT', nullable: true },
   ],

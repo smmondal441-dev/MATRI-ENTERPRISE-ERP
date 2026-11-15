@@ -16,17 +16,25 @@ export interface Product {
   name: string
   category?: string
   hsn_code: string
-  base_unit: string // e.g. "Pcs"
-  outer_unit: string // e.g. "Bag"
-  conversion_factor: number // 1 outer = N base (e.g. 1 Bag = 200 Pcs)
+  base_unit: string // e.g. "Pcs" for packaged, "Kg"/"Gm" for loose
+  outer_unit: string // e.g. "Bag" for packaged; for loose, forced = base_unit
+  conversion_factor: number // 1 outer = N base (e.g. 1 Bag = 200 Pcs); loose = 1
   pack_size?: string // e.g. "200g", "500ml"
+  // Loose Product flag — when true, the product is sold by weight (Kg/Gm)
+  // instead of packaged units. UI hides Outer Unit + Conversion Factor inputs
+  // and asks for "Rate per Kg" instead of per-Bag. Optional so legacy rows
+  // (pre-Loose-Product feature) read as undefined → treated as packaged.
+  is_loose?: boolean
 
   // --------------------------------------------------------------------------
   // v4 — Per-piece pricing model (flipped)
   // --------------------------------------------------------------------------
   // USER INPUTS (primary):
   //   purchase_rate_per_outer_unit — total buying price per Bag/Peti (e.g. ₹600)
+  //                                 for loose products, == purchase_rate_per_piece
+  //                                 since conversion_factor = 1.
   //   selling_rate_per_piece       — default selling rate per Pcs (e.g. ₹3.50)
+  //                                 for loose products, this is "rate per Kg/Gm".
   //
   // AUTO-COMPUTED & PERSISTED (so POS profit calc never re-derives):
   //   purchase_rate_per_piece      = purchase_rate_per_outer_unit / conversion_factor
@@ -47,6 +55,8 @@ export interface Product {
 
   gst_percent: number
   opening_stock_pcs: number // opening stock in base (Pcs) units
+  // Soft Delete (Recycle Bin)
+  is_deleted?: boolean
   created_at: string
 
   // v5 — Hybrid sync. Defaults to false on local create; flipped to true once
@@ -64,6 +74,7 @@ export interface Customer {
   gstin?: string
   opening_balance: number // opening dues (positive = customer owes us)
   bill_number?: string // optional customer bill/reference number
+  is_deleted?: boolean // Soft Delete
   created_at: string
 
   // v5 — Hybrid sync
@@ -92,6 +103,7 @@ export interface Purchase {
   total_amount: number
   mfg_date?: string // manufacturing date (YYYY-MM-DD), optional
   expiry_date?: string // expiry date (YYYY-MM-DD), optional
+  is_deleted?: boolean // Soft Delete
   created_at: string
 
   // v5 — Hybrid sync
@@ -117,6 +129,7 @@ export interface SaleItem {
   item_profit: number
   item_margin_percent: number
 
+  is_deleted?: boolean // Soft Delete
   // v5 — Hybrid sync
   isSynced?: boolean
   synced_at?: string | null
@@ -136,6 +149,7 @@ export interface Sale {
   total_profit: number
   total_margin_percent: number
   paid_amount: number // for cash sales = total; for credit = 0 (until collection)
+  is_deleted?: boolean // Soft Delete
   created_at: string
 
   // v5 — Hybrid sync
@@ -231,6 +245,12 @@ export interface Damage {
   // Denormalized customer_name for fast display in the Damages log without
   // needing to join/lookup the customer by id.
   customer_name?: string
+  // Task 2 — Bill-wise damage allocation. When a store-return damage is
+  // attributed to a specific sale/invoice, this holds the sale_id + a
+  // denormalized invoice_no snapshot. Both optional so existing damage
+  // records (which have no bill link) remain valid.
+  sale_id?: number
+  against_invoice_no?: string
   created_at: string
 
   // v5 — Hybrid sync
@@ -399,6 +419,29 @@ export class FmcgDatabase extends Dexie {
     // Existing rows have damage_source=undefined → UI treats them as 'godown'.
     this.version(7).stores({
       damages: '++id, date, product_id, product_sku, reason, damage_source, customer_id, created_at, isSynced',
+    })
+    // v8 — Task 2: Bill-wise damage allocation (sale_id + against_invoice_no).
+    // Both nullable + optional — old rows without bill links remain valid.
+    // Index includes sale_id so BillDuesService can query damages by sale.
+    this.version(8).stores({
+      damages: '++id, date, product_id, product_sku, reason, damage_source, customer_id, sale_id, against_invoice_no, created_at, isSynced',
+    })
+    // v9 — Loose Product flag (is_loose). Adds is_loose to the products index
+    // so the UI can quickly filter packaged vs loose products. Optional field
+    // — legacy rows read as undefined → treated as packaged (false).
+    this.version(9).stores({
+      products:
+        '++id, sku, company_name, name, category, hsn_code, base_unit, outer_unit, created_at, isSynced, is_loose',
+    })
+    // v10 — Soft Delete (is_deleted). Adds is_deleted to 5 core tables so the
+    // Recycle Bin can query deleted items efficiently. Optional field — legacy
+    // rows read as undefined → treated as not deleted.
+    this.version(10).stores({
+      products: '++id, sku, company_name, name, category, hsn_code, base_unit, outer_unit, created_at, isSynced, is_loose, is_deleted',
+      customers: '++id, customer_id, name, route_area, phone, gstin, created_at, isSynced, is_deleted',
+      purchases: '++id, bill_no, date, supplier_name, supplier_gstin, product_id, product_sku, created_at, isSynced, is_deleted',
+      sales: '++id, invoice_no, date, customer_id, customer_name, payment_mode, created_at, isSynced, is_deleted',
+      sale_items: '++id, sale_id, product_id, product_sku, isSynced, is_deleted',
     })
   }
 }

@@ -1,8 +1,14 @@
 'use client'
 
 import { useState, useMemo } from 'react'
-import { useProducts, useDamages, useDamageTotals, useCustomers } from '@/lib/hooks/use-erp'
-import { DamageService, getPurchaseRatePerPiece } from '@/lib/services/repository'
+import {
+  useProducts,
+  useDamages,
+  useDamageTotals,
+  useCustomers,
+  useBillDues,
+} from '@/lib/hooks/use-erp'
+import { DamageService, getPurchaseRatePerPiece, type BillDue } from '@/lib/services/repository'
 import {
   formatINR,
   formatNumber,
@@ -69,6 +75,10 @@ export function Damages() {
   const [damageSource, setDamageSource] = useState<DamageSource>('godown')
   // Optional customer reference for store-damages only
   const [customerId, setCustomerId] = useState('')
+  // Task 2 — Bill-wise damage allocation. When source = 'store' AND the user
+  // attributes the damage to a specific bill, saleId holds the sale_id.
+  // Empty string = unattributed (no bill deduction).
+  const [saleId, setSaleId] = useState('')
 
   const selectedProduct = useMemo(
     () => (products ?? []).find((p) => String(p.id) === productId),
@@ -82,6 +92,21 @@ export function Damages() {
         ? (customers ?? []).find((c) => String(c.id) === customerId)
         : undefined,
     [customers, customerId, damageSource]
+  )
+  // Task 2 — Load the selected customer's outstanding credit bills so the
+  // user can attribute the damage to a specific invoice (Tally-style).
+  // Only fetched when source = 'store' AND a customer is picked.
+  const selectedCustIdNum = damageSource === 'store' && customerId
+    ? (customers ?? []).find((c) => String(c.id) === customerId)?.id ?? null
+    : null
+  const billDues = useBillDues(selectedCustIdNum)
+  // Resolve the selected bill's invoice_no for snapshotting on save.
+  const selectedBill = useMemo(
+    () =>
+      saleId && billDues
+        ? billDues.find((b) => String(b.sale.id) === saleId)
+        : undefined,
+    [saleId, billDues]
   )
 
   const conversion = selectedProduct?.conversion_factor ?? 1
@@ -98,6 +123,7 @@ export function Damages() {
     setNotes('')
     setDamageSource('godown')
     setCustomerId('')
+    setSaleId('')
   }
 
   const save = async () => {
@@ -154,6 +180,16 @@ export function Damages() {
         damage_source: damageSource,
         customer_id: damageSource === 'store' ? selectedCustomer!.id! : undefined,
         customer_name: damageSource === 'store' ? selectedCustomer!.name : undefined,
+        // Task 2 — Bill-wise damage allocation fields. Only persisted when
+        // source = 'store' AND the user picked a bill.
+        sale_id:
+          damageSource === 'store' && saleId
+            ? Number(saleId)
+            : undefined,
+        against_invoice_no:
+          damageSource === 'store' && saleId
+            ? selectedBill?.invoice_no ?? ''
+            : undefined,
       })
       toast({
         title: 'Damage recorded',
@@ -277,22 +313,40 @@ export function Damages() {
               />
             </Field>
             <div className="grid grid-cols-2 gap-3">
-              <Field label={`Bag Qty (1 Bag = ${conversion} Pcs)`}>
-                <Input
-                  type="number"
-                  min={0}
-                  value={bagQty}
-                  onChange={(e) => setBagQty(Number(e.target.value))}
-                />
-              </Field>
-              <Field label="Extra Pcs">
-                <Input
-                  type="number"
-                  min={0}
-                  value={pcsQty}
-                  onChange={(e) => setPcsQty(Number(e.target.value))}
-                />
-              </Field>
+              {/* Loose products: hide Bag Qty, show single Qty input */}
+              {selectedProduct?.is_loose ? (
+                <Field label={`Qty (${selectedProduct.base_unit})`}>
+                  <Input
+                    type="number"
+                    min={0}
+                    step="0.001"
+                    value={pcsQty}
+                    onChange={(e) => {
+                      setPcsQty(Number(e.target.value))
+                      setBagQty(0)
+                    }}
+                  />
+                </Field>
+              ) : (
+                <>
+                  <Field label={`Bag Qty (1 Bag = ${conversion} Pcs)`}>
+                    <Input
+                      type="number"
+                      min={0}
+                      value={bagQty}
+                      onChange={(e) => setBagQty(Number(e.target.value))}
+                    />
+                  </Field>
+                  <Field label="Extra Pcs">
+                    <Input
+                      type="number"
+                      min={0}
+                      value={pcsQty}
+                      onChange={(e) => setPcsQty(Number(e.target.value))}
+                    />
+                  </Field>
+                </>
+              )}
             </div>
             <Field label="Reason">
               <Select value={reason} onValueChange={(v: DamageReason) => setReason(v)}>
@@ -345,7 +399,12 @@ export function Damages() {
                 <Combobox<Customer>
                   items={customers ?? []}
                   value={customerId}
-                  onValueChange={setCustomerId}
+                  onValueChange={(v) => {
+                    setCustomerId(v)
+                    // Clear the bill selection when the customer changes —
+                    // old customer's bills don't apply to the new one.
+                    setSaleId('')
+                  }}
                   getItemValue={(c) => String(c.id)}
                   getItemLabel={(c) => `${c.customer_id} · ${c.name}`}
                   filterFn={(c, q) =>
@@ -366,6 +425,57 @@ export function Damages() {
                     </div>
                   )}
                 />
+              </Field>
+            )}
+
+            {/* Task 2 — Against Bill picker. Visible only for store-damages
+                when a customer is selected AND that customer has outstanding
+                credit bills. Lets the user attribute the damage to a specific
+                invoice so it gets deducted from that bill's Net Payable in the
+                Collection screen (Tally-style adjustment). */}
+            {damageSource === 'store' && customerId && billDues && billDues.length > 0 && (
+              <Field label="Against Bill (optional — deduct from invoice)">
+                <Combobox<BillDue>
+                  items={billDues}
+                  value={saleId}
+                  onValueChange={setSaleId}
+                  getItemValue={(b) => String(b.sale.id)}
+                  getItemLabel={(b) =>
+                    `${b.invoice_no} · Net Payable ${formatINR(b.net_payable)}`
+                  }
+                  filterFn={(b, q) =>
+                    b.invoice_no.toLowerCase().includes(q) ||
+                    String(b.sale.date).includes(q)
+                  }
+                  placeholder="Select invoice to attribute damage to (optional)..."
+                  searchPlaceholder="Search invoice no..."
+                  emptyText="No outstanding bills match."
+                  renderItem={(b) => (
+                    <div className="flex w-full items-center justify-between gap-2 leading-tight">
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate font-mono text-xs font-semibold">
+                          {b.invoice_no}
+                        </div>
+                        <div className="text-[11px] text-muted-foreground">
+                          {b.sale.date} · Total {formatINR(b.total_amount)}
+                        </div>
+                      </div>
+                      <div className="shrink-0 text-right text-[11px]">
+                        <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                          Net Payable
+                        </div>
+                        <div className="font-semibold text-red-600">
+                          {formatINR(b.net_payable)}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                />
+                <p className="mt-1 text-[10px] leading-snug text-muted-foreground">
+                  Selecting a bill deducts this damage's expense value from that
+                  invoice's Net Payable in the Collection screen. Leave blank to
+                  record as an unattributed store-damage.
+                </p>
               </Field>
             )}
 
@@ -464,6 +574,11 @@ export function Damages() {
                           {src === 'store' && d.customer_name && (
                             <div className="mt-0.5 text-[10px] text-blue-700">
                               👤 {d.customer_name}
+                            </div>
+                          )}
+                          {src === 'store' && d.against_invoice_no && (
+                            <div className="mt-0.5 inline-flex items-center gap-1 rounded bg-blue-50 px-1.5 py-0.5 font-mono text-[10px] text-blue-700">
+                              🧾 {d.against_invoice_no}
                             </div>
                           )}
                         </TableCell>

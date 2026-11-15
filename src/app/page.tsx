@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { BackupService } from '@/lib/services/repository'
-import { pullFromServer } from '@/lib/services/sync'
+import { pullFromServer, isDataStale } from '@/lib/services/sync'
 import type { LucideIcon } from 'lucide-react'
 import {
   LayoutDashboard,
@@ -19,6 +19,7 @@ import {
   X,
   AlertTriangle,
   Undo2,
+  Recycle,
   PanelLeftClose,
   PanelLeftOpen,
 } from 'lucide-react'
@@ -37,6 +38,7 @@ import { Settings as SettingsModule } from '@/components/erp/modules/Settings'
 import { Damages } from '@/components/erp/modules/Damages'
 import { StockReturns } from '@/components/erp/modules/StockReturns'
 import { SyncStatusBadge } from '@/components/erp/SyncStatusBadge'
+import { RecycleBin } from '@/components/erp/modules/RecycleBin'
 
 export type ModuleKey =
   | 'dashboard'
@@ -50,6 +52,7 @@ export type ModuleKey =
   | 'damages'
   | 'returns'
   | 'gst-reports'
+  | 'recycle-bin'
   | 'settings'
 
 interface NavItem {
@@ -71,6 +74,7 @@ const NAV_ITEMS: NavItem[] = [
   { key: 'damages', label: 'Damage & Adjustment', icon: AlertTriangle, group: 'Stock' },
   { key: 'returns', label: 'Stock Returns', icon: Undo2, group: 'Stock' },
   { key: 'gst-reports', label: 'GST & Tax Reports', icon: FileText, group: 'Reports' },
+  { key: 'recycle-bin', label: 'Recycle Bin', icon: Recycle, group: 'System' },
   { key: 'settings', label: 'Settings & Backup', icon: Settings, group: 'System' },
 ]
 
@@ -110,14 +114,18 @@ export default function Home() {
 
   useEffect(() => {
     ;(async () => {
-      // ---- Multi-device boot sequence ----
+      // ---- Multi-device boot sequence (2-Way Sync) ----
       // 1. Check if local IndexedDB has been initialized before (meta `seeded` flag).
       // 2. If NOT seeded (truly first launch on this device):
-      //    a. Try pulling real data from CockroachDB first.
+      //    a. Try pulling real data from Turso first.
       //    b. If pull succeeds (server has data), use it — skip seeding.
       //    c. If pull fails (server unreachable or empty), fall back to local seed.
-      // 3. If already seeded (returning visitor), skip everything — IndexedDB is
-      //    the single source of truth.
+      // 3. If already seeded (returning visitor):
+      //    a. Check if the last pull is stale (> 5 minutes ago, or never).
+      //    b. If stale, trigger a background pull to get the latest cloud data
+      //       (e.g. new sales pushed by Laptop 1 while Laptop 2 was closed).
+      //       The pull has conflict protection — it won't overwrite local
+      //       unsynced edits.
 
       try {
         // Check the meta flag — has this device been initialized before?
@@ -131,14 +139,40 @@ export default function Home() {
 
           if (pullResult.ok && pullResult.totalRecords > 0) {
             console.log('[boot] Pulled', pullResult.totalRecords, 'records from server. Skipping seed.')
+            // Store lastPullAt so the staleness check works on next boot.
+            await db.meta.put({ key: 'lastPullAt', value: new Date().toISOString() })
           } else {
             console.log('[boot] Pull failed or server empty. Falling back to local seed.')
             await BackupService.seedIfEmpty()
           }
         } else {
-          // Already initialized — IndexedDB is the source of truth. No action needed.
-          // seedIfEmpty() would also detect this and return immediately, but we
-          // skip the call entirely to avoid an unnecessary DB read.
+          // Already initialized — IndexedDB is the source of truth for this device.
+          // But check if the data is STALE: if the last pull was > 5 minutes ago
+          // (or never), trigger a background pull to get the latest cloud changes
+          // from other devices. This is the core of 2-way multi-device sync.
+          const stale = await isDataStale(5 * 60 * 1000) // 5 minutes
+          if (stale) {
+            console.log('[boot] Data is stale (last pull > 5 min ago). Triggering background pull...')
+            // Fire-and-forget — don't block the boot. The user sees their local
+            // data immediately, and the pull updates IndexedDB in the background.
+            // The live-query hooks (useProducts, useSales, etc.) will re-render
+            // automatically when IndexedDB updates.
+            pullFromServer()
+              .then((result) => {
+                if (result.ok) {
+                  console.log('[boot] Background pull complete:', result.totalRecords, 'records')
+                  // Update lastPullAt in the meta table.
+                  db.meta.put({ key: 'lastPullAt', value: new Date().toISOString() })
+                } else {
+                  console.warn('[boot] Background pull failed:', result.error)
+                }
+              })
+              .catch((e) => {
+                console.warn('[boot] Background pull error:', e?.message ?? e)
+              })
+          } else {
+            console.log('[boot] Data is fresh (last pull < 5 min ago). Skipping background pull.')
+          }
         }
       } catch (e) {
         // If anything goes wrong (DB not open, network error, etc.),
@@ -187,6 +221,8 @@ export default function Home() {
         return <StockReturns />
       case 'gst-reports':
         return <GstReports />
+      case 'recycle-bin':
+        return <RecycleBin />
       case 'settings':
         return <SettingsModule />
       default:

@@ -3,6 +3,36 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* ----------------------------------------------------------------------------
+ * Task 3 — Global ERP UI/UX update (Blue & White theme + 20px base font)
+ * ----------------------------------------------------------------------------
+ * Sets the baseline font-size to 20px so `text-base` (1rem) = 20px. Scales
+ * all rem-based Tailwind classes proportionally for warehouse readability
+ * without making dense tables wrap excessively (25px was too large).
+ * Middle-aged users benefit from the larger text + bolder weights applied
+ * via the `table td, table th { font-weight: 500 }` rule below.
+ * -------------------------------------------------------------------------- */
+html {
+  font-size: 20px;
+}
+
+/* Body inherits the 20px base + slightly heavier default weight for primary
+   text readability (warehouse environment). */
+body {
+  font-weight: 450; /* slightly heavier than default 400 */
+}
+
+/* Table data + headers get `font-medium` (500) for better readability by
+   middle-aged users — applies to every shadcn <Table> globally. */
+table td,
+table th {
+  font-weight: 500;
+}
+/* But table header cells get bolder treatment (semibold) for hierarchy. */
+table thead th {
+  font-weight: 600;
+}
+
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -45,72 +75,75 @@
 
 :root {
   --radius: 0.625rem;
-  /* FMCG ERP — emerald primary, slate neutrals, no indigo/blue by default */
-  --background: oklch(0.99 0.005 150);
-  --foreground: oklch(0.18 0.02 200);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.18 0.02 200);
+  /* Task 3 — Blue & White ERP theme (Tally/SAP classic look).
+     Swapped from emerald (oklch hue 162) to blue (oklch hue ~250).
+     Professional blue-600/700 for primary buttons, active borders, headers.
+     White/slate-50 for backgrounds. */
+  --background: oklch(0.99 0.005 250);   /* near-white with faint blue tint */
+  --foreground: oklch(0.18 0.02 250);   /* near-black with faint blue tint */
+  --card: oklch(1 0 0);                 /* pure white cards */
+  --card-foreground: oklch(0.18 0.02 250);
   --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.18 0.02 200);
-  --primary: oklch(0.55 0.13 162);
+  --popover-foreground: oklch(0.18 0.02 250);
+  --primary: oklch(0.55 0.18 250);       /* blue-600 equivalent */
   --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0.01 150);
-  --secondary-foreground: oklch(0.25 0.04 162);
-  --muted: oklch(0.97 0.01 150);
-  --muted-foreground: oklch(0.5 0.02 200);
-  --accent: oklch(0.93 0.05 162);
-  --accent-foreground: oklch(0.25 0.04 162);
+  --secondary: oklch(0.97 0.015 250);    /* very light blue-grey */
+  --secondary-foreground: oklch(0.25 0.04 250);
+  --muted: oklch(0.97 0.015 250);
+  --muted-foreground: oklch(0.5 0.02 250);
+  --accent: oklch(0.93 0.04 250);        /* light blue accent */
+  --accent-foreground: oklch(0.25 0.04 250);
   --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.9 0.01 150);
-  --input: oklch(0.92 0.01 150);
-  --ring: oklch(0.55 0.13 162);
-  --chart-1: oklch(0.55 0.13 162);
-  --chart-2: oklch(0.65 0.18 50);
-  --chart-3: oklch(0.6 0.15 220);
-  --chart-4: oklch(0.78 0.16 80);
-  --chart-5: oklch(0.7 0.18 350);
-  --sidebar: oklch(0.98 0.005 150);
-  --sidebar-foreground: oklch(0.18 0.02 200);
-  --sidebar-primary: oklch(0.55 0.13 162);
+  --border: oklch(0.9 0.01 250);
+  --input: oklch(0.92 0.01 250);
+  --ring: oklch(0.55 0.18 250);          /* blue focus ring */
+  --chart-1: oklch(0.55 0.18 250);       /* blue */
+  --chart-2: oklch(0.65 0.18 50);        /* amber */
+  --chart-3: oklch(0.6 0.15 150);        /* emerald (kept for variety) */
+  --chart-4: oklch(0.78 0.16 80);        /* yellow */
+  --chart-5: oklch(0.7 0.18 350);        /* pink */
+  --sidebar: oklch(0.98 0.005 250);      /* near-white sidebar */
+  --sidebar-foreground: oklch(0.18 0.02 250);
+  --sidebar-primary: oklch(0.55 0.18 250);
   --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.93 0.05 162);
-  --sidebar-accent-foreground: oklch(0.25 0.04 162);
-  --sidebar-border: oklch(0.9 0.01 150);
-  --sidebar-ring: oklch(0.55 0.13 162);
+  --sidebar-accent: oklch(0.93 0.04 250);
+  --sidebar-accent-foreground: oklch(0.25 0.04 250);
+  --sidebar-border: oklch(0.9 0.01 250);
+  --sidebar-ring: oklch(0.55 0.18 250);
 }
 
 .dark {
-  --background: oklch(0.14 0.01 200);
-  --foreground: oklch(0.98 0.005 150);
-  --card: oklch(0.2 0.015 200);
-  --card-foreground: oklch(0.98 0.005 150);
-  --popover: oklch(0.2 0.015 200);
-  --popover-foreground: oklch(0.98 0.005 150);
-  --primary: oklch(0.65 0.15 162);
-  --primary-foreground: oklch(0.18 0.02 200);
-  --secondary: oklch(0.27 0.02 200);
-  --secondary-foreground: oklch(0.98 0.005 150);
-  --muted: oklch(0.27 0.02 200);
-  --muted-foreground: oklch(0.7 0.02 200);
-  --accent: oklch(0.3 0.05 162);
-  --accent-foreground: oklch(0.98 0.005 150);
+  --background: oklch(0.14 0.015 250);
+  --foreground: oklch(0.98 0.005 250);
+  --card: oklch(0.2 0.02 250);
+  --card-foreground: oklch(0.98 0.005 250);
+  --popover: oklch(0.2 0.02 250);
+  --popover-foreground: oklch(0.98 0.005 250);
+  --primary: oklch(0.65 0.18 250);
+  --primary-foreground: oklch(0.18 0.02 250);
+  --secondary: oklch(0.27 0.02 250);
+  --secondary-foreground: oklch(0.98 0.005 250);
+  --muted: oklch(0.27 0.02 250);
+  --muted-foreground: oklch(0.7 0.02 250);
+  --accent: oklch(0.3 0.05 250);
+  --accent-foreground: oklch(0.98 0.005 250);
   --destructive: oklch(0.704 0.191 22.216);
   --border: oklch(1 0 0 / 10%);
   --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.65 0.15 162);
-  --chart-1: oklch(0.65 0.15 162);
+  --ring: oklch(0.65 0.18 250);
+  --chart-1: oklch(0.65 0.18 250);
   --chart-2: oklch(0.7 0.18 50);
-  --chart-3: oklch(0.7 0.18 220);
+  --chart-3: oklch(0.7 0.18 150);
   --chart-4: oklch(0.78 0.16 80);
   --chart-5: oklch(0.7 0.18 350);
-  --sidebar: oklch(0.18 0.015 200);
-  --sidebar-foreground: oklch(0.98 0.005 150);
-  --sidebar-primary: oklch(0.65 0.15 162);
+  --sidebar: oklch(0.18 0.015 250);
+  --sidebar-foreground: oklch(0.98 0.005 250);
+  --sidebar-primary: oklch(0.65 0.18 250);
   --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.3 0.05 162);
-  --sidebar-accent-foreground: oklch(0.98 0.005 150);
+  --sidebar-accent: oklch(0.3 0.05 250);
+  --sidebar-accent-foreground: oklch(0.98 0.005 250);
   --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.65 0.15 162);
+  --sidebar-ring: oklch(0.65 0.18 250);
 }
 
 @layer base {

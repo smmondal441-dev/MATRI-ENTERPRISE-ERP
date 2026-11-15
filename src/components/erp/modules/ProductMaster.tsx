@@ -50,11 +50,15 @@ import {
   Pencil,
   Trash2,
   AlertTriangle,
+  Scale,
 } from 'lucide-react'
 import type { Product } from '@/lib/db/dexie'
 
 const UNITS_OUTER = ['Bag', 'Peti', 'Carton', 'Box', 'Case', 'Tray']
 const UNITS_BASE = ['Pcs', 'Gm', 'Kg', 'Ml', 'Ltr']
+// Loose products can only be sold by weight — restrict the base unit picker
+// to Kg/Gm so the POS cart math (which converts Gm→Kg) stays consistent.
+const UNITS_LOOSE = ['Kg', 'Gm']
 
 interface FormState {
   sku: string
@@ -66,10 +70,13 @@ interface FormState {
   base_unit: string
   conversion_factor: number
   pack_size: string
+  // Loose Product flag — when true, UI hides Outer Unit + Conversion Factor
+  // and asks for "Rate per Kg/Gm" instead of per-Bag/per-Pcs.
+  is_loose: boolean
   // v4 — flipped pricing model
   // User inputs (primary):
-  purchase_rate_per_outer_unit: number // total buying price per Bag/Peti
-  selling_rate_per_piece: number // primary default selling rate per Pcs
+  purchase_rate_per_outer_unit: number // total buying price per Bag/Peti (or per Kg for loose)
+  selling_rate_per_piece: number // primary default selling rate per Pcs (or per Kg for loose)
   // Auto-computed (display only — ProductService persists these on save):
   // purchase_rate_per_piece = purchase_rate_per_outer_unit / conversion_factor
   // selling_rate_per_outer_unit = selling_rate_per_piece * conversion_factor
@@ -87,6 +94,7 @@ const EMPTY: FormState = {
   base_unit: 'Pcs',
   conversion_factor: 1,
   pack_size: '',
+  is_loose: false,
   purchase_rate_per_outer_unit: 0,
   selling_rate_per_piece: 0,
   gst_percent: 0,
@@ -130,6 +138,7 @@ export function ProductMaster() {
       base_unit: p.base_unit,
       conversion_factor: p.conversion_factor,
       pack_size: p.pack_size ?? '',
+      is_loose: Boolean(p.is_loose),
       // v4 — load the two primary inputs (per-outer buy + per-piece sell)
       purchase_rate_per_outer_unit: getPurchaseRatePerOuterUnit(p),
       selling_rate_per_piece: getSellingRatePerPiece(p),
@@ -150,7 +159,17 @@ export function ProductMaster() {
       return
     }
     try {
-      const conversionFactor = Number(form.conversion_factor) || 1
+      // ---- Loose Product normalization (mirror of ProductService.create) ----
+      // When is_loose is true, force cf=1 and outer_unit=base_unit so the
+      // pricing math stays consistent. ProductService also enforces this,
+      // but doing it here means the form state + preview are accurate too.
+      const isLoose = Boolean(form.is_loose)
+      const baseUnit = isLoose
+        ? (form.base_unit || 'Kg')
+        : form.base_unit
+      const outerUnit = isLoose ? baseUnit : form.outer_unit
+      const conversionFactor = isLoose ? 1 : Number(form.conversion_factor) || 1
+
       const purchaseRatePerOuterUnit = Number(form.purchase_rate_per_outer_unit) || 0
       const sellingRatePerPiece = Number(form.selling_rate_per_piece) || 0
       // v4 — compute the auto-derived per-piece / per-outer rates so the
@@ -161,6 +180,9 @@ export function ProductMaster() {
 
       const payload = {
         ...form,
+        is_loose: isLoose,
+        base_unit: baseUnit,
+        outer_unit: outerUnit,
         conversion_factor: conversionFactor,
         purchase_rate_per_outer_unit: purchaseRatePerOuterUnit,
         purchase_rate_per_piece: purchaseRatePerPiece,
@@ -248,7 +270,7 @@ export function ProductMaster() {
                     <TableHead className="text-right">Sell Rate</TableHead>
                     <TableHead className="text-right">Margin/Pcs</TableHead>
                     <TableHead className="text-right">GST%</TableHead>
-                    <TableHead className="text-right">Stock (Pcs)</TableHead>
+                    <TableHead className="text-right">Stock</TableHead>
                     <TableHead className="text-right">Actions</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -264,13 +286,26 @@ export function ProductMaster() {
                             {p.pack_size}
                           </div>
                         )}
+                        {p.is_loose && (
+                          <span className="mt-0.5 inline-flex items-center gap-1 rounded-full bg-blue-50 px-1.5 py-0.5 text-[10px] font-semibold text-blue-700">
+                            <Scale className="h-2.5 w-2.5" />
+                            Loose
+                          </span>
+                        )}
                       </TableCell>
                       <TableCell className="font-mono text-xs">{p.hsn_code}</TableCell>
                       <TableCell className="text-xs">
-                        <div>
-                          <span className="font-medium">1 {p.outer_unit}</span>{' '}
-                          = {formatNumber(p.conversion_factor, 0)} {p.base_unit}
-                        </div>
+                        {p.is_loose ? (
+                          <div>
+                            <span className="font-medium">Loose</span>{' '}
+                            · {p.base_unit}
+                          </div>
+                        ) : (
+                          <div>
+                            <span className="font-medium">1 {p.outer_unit}</span>{' '}
+                            = {formatNumber(p.conversion_factor, 0)} {p.base_unit}
+                          </div>
+                        )}
                       </TableCell>
                       <TableCell className="text-right text-xs">
                         <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
@@ -342,6 +377,46 @@ export function ProductMaster() {
             </DialogTitle>
           </DialogHeader>
 
+          {/* ---- Packaged / Loose product type toggle ---- */}
+          <div className="flex items-center gap-2 rounded-md border border-border bg-muted/30 p-2">
+            <span className="text-xs font-medium text-muted-foreground">Type:</span>
+            <Button
+              type="button"
+              variant={!form.is_loose ? 'default' : 'outline'}
+              size="sm"
+              className="h-7 text-xs"
+              onClick={() =>
+                setForm({
+                  ...form,
+                  is_loose: false,
+                  // Restore packaged defaults if user switches back
+                  base_unit: form.base_unit === 'Kg' || form.base_unit === 'Gm' ? 'Pcs' : form.base_unit,
+                  outer_unit: form.outer_unit === form.base_unit ? 'Bag' : form.outer_unit,
+                })
+              }
+            >
+              <Package className="mr-1 h-3.5 w-3.5" /> Packaged (Bag/Peti → Pcs)
+            </Button>
+            <Button
+              type="button"
+              variant={form.is_loose ? 'default' : 'outline'}
+              size="sm"
+              className="h-7 text-xs"
+              onClick={() =>
+                setForm({
+                  ...form,
+                  is_loose: true,
+                  // Force loose defaults: base = Kg, outer = Kg, cf = 1
+                  base_unit: 'Kg',
+                  outer_unit: 'Kg',
+                  conversion_factor: 1,
+                })
+              }
+            >
+              <Scale className="mr-1 h-3.5 w-3.5" /> Loose (Kg / Gm)
+            </Button>
+          </div>
+
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <Field label="SKU *">
               <Input
@@ -378,33 +453,44 @@ export function ProductMaster() {
                 placeholder="e.g. 1905"
               />
             </Field>
-            <Field label="Outer Unit">
-              <Select
-                value={form.outer_unit}
-                onValueChange={(v) => setForm({ ...form, outer_unit: v })}
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {UNITS_OUTER.map((u) => (
-                    <SelectItem key={u} value={u}>
-                      {u}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </Field>
-            <Field label="Base Unit">
+            {/* ---- Outer Unit — hidden for loose products (forced = base_unit) ---- */}
+            {!form.is_loose && (
+              <Field label="Outer Unit">
+                <Select
+                  value={form.outer_unit}
+                  onValueChange={(v) => setForm({ ...form, outer_unit: v })}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {UNITS_OUTER.map((u) => (
+                      <SelectItem key={u} value={u}>
+                        {u}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </Field>
+            )}
+            {/* ---- Base Unit — for loose products, restrict to Kg/Gm ---- */}
+            <Field label={form.is_loose ? 'Base Unit (weight)' : 'Base Unit'}>
               <Select
                 value={form.base_unit}
-                onValueChange={(v) => setForm({ ...form, base_unit: v })}
+                onValueChange={(v) =>
+                  setForm({
+                    ...form,
+                    base_unit: v,
+                    // Loose: outer_unit forced = base_unit (cf=1 enforced on save)
+                    ...(form.is_loose ? { outer_unit: v } : {}),
+                  })
+                }
               >
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {UNITS_BASE.map((u) => (
+                  {(form.is_loose ? UNITS_LOOSE : UNITS_BASE).map((u) => (
                     <SelectItem key={u} value={u}>
                       {u}
                     </SelectItem>
@@ -412,16 +498,19 @@ export function ProductMaster() {
                 </SelectContent>
               </Select>
             </Field>
-            <Field label={`Conversion Factor (1 ${form.outer_unit} = ? ${form.base_unit})`}>
-              <Input
-                type="number"
-                min={1}
-                value={form.conversion_factor}
-                onChange={(e) =>
-                  setForm({ ...form, conversion_factor: Number(e.target.value) })
-                }
-              />
-            </Field>
+            {/* ---- Conversion Factor — hidden for loose products (forced = 1) ---- */}
+            {!form.is_loose && (
+              <Field label={`Conversion Factor (1 ${form.outer_unit} = ? ${form.base_unit})`}>
+                <Input
+                  type="number"
+                  min={1}
+                  value={form.conversion_factor}
+                  onChange={(e) =>
+                    setForm({ ...form, conversion_factor: Number(e.target.value) })
+                  }
+                />
+              </Field>
+            )}
             <Field label="Pack Size (grams/ml)">
               <Input
                 value={form.pack_size}
@@ -429,7 +518,8 @@ export function ProductMaster() {
                 placeholder="e.g. 200g / 500ml"
               />
             </Field>
-            <Field label={`Purchase Rate (per ${form.outer_unit}) *`}>
+            {/* ---- Purchase Rate — label adapts: per-Bag (packaged) vs per-Kg (loose) ---- */}
+            <Field label={`Purchase Rate (per ${form.is_loose ? form.base_unit : form.outer_unit}) *`}>
               <Input
                 type="number"
                 step="0.01"
@@ -437,9 +527,10 @@ export function ProductMaster() {
                 onChange={(e) =>
                   setForm({ ...form, purchase_rate_per_outer_unit: Number(e.target.value) })
                 }
-                placeholder="e.g. ₹600 per Bag"
+                placeholder={form.is_loose ? 'e.g. ₹120 per Kg' : 'e.g. ₹600 per Bag'}
               />
             </Field>
+            {/* ---- Selling Rate — label adapts: per-Pcs (packaged) vs per-Kg (loose) ---- */}
             <Field label={`Selling Rate (per ${form.base_unit}) *`}>
               <Input
                 type="number"
@@ -448,7 +539,7 @@ export function ProductMaster() {
                 onChange={(e) =>
                   setForm({ ...form, selling_rate_per_piece: Number(e.target.value) })
                 }
-                placeholder="e.g. ₹3.50 per Pcs"
+                placeholder={form.is_loose ? 'e.g. ₹150 per Kg' : 'e.g. ₹3.50 per Pcs'}
               />
             </Field>
             <Field label="GST %">

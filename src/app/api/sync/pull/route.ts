@@ -464,6 +464,9 @@ export async function GET() {
     outer_unit: safeStr(pick(p, 'outerUnit', 'outer_unit', 'Bag')),
     conversion_factor: safeNum(pick(p, 'conversionFactor', 'conversion_factor', 1), 1),
     pack_size: safeStrNull(pick(p, 'packSize', 'pack_size', null)) ?? undefined,
+    // Loose Product flag — defaults to false for backward compat.
+    is_loose: Boolean(pick(p, 'isLoose', 'is_loose', false)),
+    is_deleted: Boolean(pick(p, 'isDeleted', 'is_deleted', false)),
     purchase_rate_per_outer_unit: safeNum(pick(p, 'purchaseRatePerOuterUnit', 'purchase_rate_per_outer_unit', 0)),
     purchase_rate_per_piece: safeNum(pick(p, 'purchaseRatePerPiece', 'purchase_rate_per_piece', 0)),
     selling_rate_per_piece: safeNum(pick(p, 'sellingRatePerPiece', 'selling_rate_per_piece', 0)),
@@ -496,6 +499,7 @@ export async function GET() {
     gstin: safeStrNull(pick(c, 'gstin', 'gstin', null)) ?? undefined,
     opening_balance: safeNum(pick(c, 'openingBalance', 'opening_balance', 0)),
     bill_number: safeStrNull(pick(c, 'billNumber', 'bill_number', null)) ?? undefined,
+    is_deleted: Boolean(pick(c, 'isDeleted', 'is_deleted', false)),
     created_at: safeISO(pick(c, 'createdAt', 'created_at', null)),
     isSynced: true,
     synced_at: safeISONullable(pick(c, 'syncedAt', 'synced_at', null)),
@@ -522,6 +526,7 @@ export async function GET() {
     total_amount: safeNum(pick(p, 'totalAmount', 'total_amount', 0)),
     mfg_date: isoDateOnlyOrUndef(pick(p, 'mfgDate', 'mfg_date', null)),
     expiry_date: isoDateOnlyOrUndef(pick(p, 'expiryDate', 'expiry_date', null)),
+    is_deleted: Boolean(pick(p, 'isDeleted', 'is_deleted', false)),
     created_at: safeISO(pick(p, 'createdAt', 'created_at', null)),
     isSynced: true,
     synced_at: safeISONullable(pick(p, 'syncedAt', 'synced_at', null)),
@@ -541,6 +546,7 @@ export async function GET() {
     total_profit: safeNum(pick(s, 'totalProfit', 'total_profit', 0)),
     total_margin_percent: safeNum(pick(s, 'totalMarginPercent', 'total_margin_percent', 0)),
     paid_amount: safeNum(pick(s, 'paidAmount', 'paid_amount', 0)),
+    is_deleted: Boolean(pick(s, 'isDeleted', 'is_deleted', false)),
     created_at: safeISO(pick(s, 'createdAt', 'created_at', null)),
     isSynced: true,
     synced_at: safeISONullable(pick(s, 'syncedAt', 'synced_at', null)),
@@ -563,6 +569,7 @@ export async function GET() {
     purchase_rate: safeNum(pick(si, 'purchaseRate', 'purchase_rate', 0)),
     item_profit: safeNum(pick(si, 'itemProfit', 'item_profit', 0)),
     item_margin_percent: safeNum(pick(si, 'itemMarginPercent', 'item_margin_percent', 0)),
+    is_deleted: Boolean(pick(si, 'isDeleted', 'is_deleted', false)),
     created_at: safeISO(pick(si, 'createdAt', 'created_at', null)),
     isSynced: true,
     synced_at: safeISONullable(pick(si, 'syncedAt', 'synced_at', null)),
@@ -605,6 +612,9 @@ export async function GET() {
     // literal default 'godown' (TS would otherwise flag it as impossible).
     const damageSource: string = pick<string>(d, 'damageSource', 'damage_source', 'godown')
     const customerId = pick(d, 'customerId', 'customer_id', null)
+    // Task 2 — Bill-wise damage allocation fields. Both nullable.
+    const saleId = pick(d, 'saleId', 'sale_id', null)
+    const againstInvoiceNo = pick(d, 'againstInvoiceNo', 'against_invoice_no', null)
     return {
       id: toNum(pick(d, 'localId', 'local_id', 0)),
       date: isoDateOnly(pick(d, 'date', 'date', '')),
@@ -623,6 +633,10 @@ export async function GET() {
       damage_source: damageSource === 'store' ? 'store' : 'godown',
       // customer_id only present for store damages; null → undefined for Dexie.
       customer_id: customerId != null ? toNum(customerId) : undefined,
+      // Task 2 — sale_id + against_invoice_no only present for bill-linked
+      // store damages; null → undefined for Dexie.
+      sale_id: saleId != null ? toNum(saleId) : undefined,
+      against_invoice_no: againstInvoiceNo != null ? safeStr(againstInvoiceNo) : undefined,
       created_at: safeISO(pick(d, 'createdAt', 'created_at', null)),
       isSynced: true,
       synced_at: safeISONullable(pick(d, 'syncedAt', 'synced_at', null)),

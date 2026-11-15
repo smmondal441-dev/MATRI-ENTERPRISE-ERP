@@ -47,6 +47,13 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
+import {
   Table,
   TableBody,
   TableCell,
@@ -65,6 +72,27 @@ interface EditCartLine {
   qtyPcs: number
   rate: number // selling rate per piece (editable)
   gstPercent: number // override per-line
+  // Loose-product billing unit (Kg or Gm). Only set when product.is_loose.
+  billingUnit?: string
+}
+
+// Billing units available for loose products at POS.
+const LOOSE_BILLING_UNITS = ['Kg', 'Gm']
+
+/** Convert qty entered in billingUnit → product base_unit (Kg↔Gm). */
+function toBaseUnit(qty: number, billingUnit: string, baseUnit: string): number {
+  if (billingUnit === baseUnit) return qty
+  if (billingUnit === 'Gm' && baseUnit === 'Kg') return qty / 1000
+  if (billingUnit === 'Kg' && baseUnit === 'Gm') return qty * 1000
+  return qty
+}
+
+/** Inverse — convert base_unit qty → display/billing unit. */
+function toDisplayUnit(baseQty: number, displayUnit: string, baseUnit: string): number {
+  if (displayUnit === baseUnit) return baseQty
+  if (displayUnit === 'Gm' && baseUnit === 'Kg') return baseQty * 1000
+  if (displayUnit === 'Kg' && baseUnit === 'Gm') return baseQty / 1000
+  return baseQty
 }
 
 interface SaleEditDialogProps {
@@ -163,11 +191,18 @@ export function SaleEditDialog({
   )
 
   // ---- Per-item live computation (mirrors SalesBill's logic) ----
+  // For loose products, qty entered in billingUnit is converted to base_unit
+  // before computing taxable amount. The stored quantity_pcs is always in
+  // base_unit (Pcs or Kg).
   const computedItems: SaleDraftItem[] = useMemo(() => {
     return cart.map((line) => {
       const p = line.product
       const purchaseRatePerPiece = getPurchaseRatePerPiece(p)
-      const taxable = line.rate * line.qtyPcs
+      const effectiveQty =
+        p.is_loose && line.billingUnit
+          ? toBaseUnit(line.qtyPcs, line.billingUnit, p.base_unit)
+          : line.qtyPcs
+      const taxable = line.rate * effectiveQty
       // GST resolution per line: respect the per-line override captured in the
       // cart (which mirrors the saved item), but if useCustomGstPercent is on,
       // override it with the global custom rate.
@@ -181,14 +216,14 @@ export function SaleEditDialog({
       const sgst = (taxable * (lineGstPercent / 2)) / 100
       const total = taxable + cgst + sgst
       const itemProfit =
-        (line.rate - purchaseRatePerPiece) * line.qtyPcs
+        (line.rate - purchaseRatePerPiece) * effectiveQty
       const margin = total > 0 ? (itemProfit / total) * 100 : 0
       return {
         product_id: p.id!,
         product_name: p.name,
         product_sku: p.sku,
         hsn_code: p.hsn_code,
-        quantity_pcs: line.qtyPcs,
+        quantity_pcs: effectiveQty, // always in base_unit
         rate: line.rate,
         gst_percent: lineGstPercent,
         taxable_amount: taxable,
@@ -235,6 +270,8 @@ export function SaleEditDialog({
           qtyPcs: 1,
           rate: getSellingRatePerPiece(prod),
           gstPercent: prod.gst_percent,
+          // Loose products default to billingUnit = base_unit (usually Kg).
+          billingUnit: prod.is_loose ? (prod.base_unit || 'Kg') : undefined,
         },
       ]
     })
@@ -245,6 +282,19 @@ export function SaleEditDialog({
       prev.map((l) =>
         l.uid === uid ? { ...l, qtyPcs: Math.max(0, qty) } : l
       )
+    )
+  }
+  // Update the billing unit for a loose-product cart line. Converts the
+  // existing qty so the displayed value stays consistent.
+  const updateLineBillingUnit = (uid: string, newUnit: string) => {
+    setCart((prev) =>
+      prev.map((l) => {
+        if (l.uid !== uid || !l.product.is_loose) return l
+        const oldUnit = l.billingUnit ?? l.product.base_unit
+        const baseQty = toBaseUnit(l.qtyPcs, oldUnit, l.product.base_unit)
+        const newDisplayQty = toDisplayUnit(baseQty, newUnit, l.product.base_unit)
+        return { ...l, billingUnit: newUnit, qtyPcs: newDisplayQty }
+      })
     )
   }
   const updateLineRate = (uid: string, rate: number) => {
@@ -511,15 +561,37 @@ export function SaleEditDialog({
                             </div>
                           </TableCell>
                           <TableCell className="text-right">
-                            <Input
-                              type="number"
-                              min={0}
-                              value={line.qtyPcs}
-                              onChange={(e) =>
-                                updateLineQty(line.uid, Number(e.target.value))
-                              }
-                              className="h-8 w-20 text-right text-xs"
-                            />
+                            <div className="flex items-center justify-end gap-1">
+                              <Input
+                                type="number"
+                                min={0}
+                                step={line.product.is_loose ? '0.001' : '1'}
+                                value={line.qtyPcs}
+                                onChange={(e) =>
+                                  updateLineQty(line.uid, Number(e.target.value))
+                                }
+                                className="h-8 w-20 text-right text-xs"
+                              />
+                              {line.product.is_loose ? (
+                                <Select
+                                  value={line.billingUnit ?? line.product.base_unit}
+                                  onValueChange={(v) => updateLineBillingUnit(line.uid, v)}
+                                >
+                                  <SelectTrigger className="h-8 w-16 text-xs">
+                                    <SelectValue />
+                                  </SelectTrigger>
+                                  <SelectContent>
+                                    {LOOSE_BILLING_UNITS.map((u) => (
+                                      <SelectItem key={u} value={u}>
+                                        {u}
+                                      </SelectItem>
+                                    ))}
+                                  </SelectContent>
+                                </Select>
+                              ) : (
+                                <span className="text-xs text-muted-foreground">{line.product.base_unit}</span>
+                              )}
+                            </div>
                           </TableCell>
                           <TableCell className="text-right">
                             <Input
