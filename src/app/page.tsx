@@ -20,6 +20,7 @@ import {
   AlertTriangle,
   Undo2,
   Recycle,
+  BarChart3,
   PanelLeftClose,
   PanelLeftOpen,
 } from 'lucide-react'
@@ -39,6 +40,7 @@ import { Damages } from '@/components/erp/modules/Damages'
 import { StockReturns } from '@/components/erp/modules/StockReturns'
 import { SyncStatusBadge } from '@/components/erp/SyncStatusBadge'
 import { RecycleBin } from '@/components/erp/modules/RecycleBin'
+import { CompanyAnalytics } from '@/components/erp/modules/CompanyAnalytics'
 
 export type ModuleKey =
   | 'dashboard'
@@ -52,6 +54,7 @@ export type ModuleKey =
   | 'damages'
   | 'returns'
   | 'gst-reports'
+  | 'company-analytics'
   | 'recycle-bin'
   | 'settings'
 
@@ -74,6 +77,7 @@ const NAV_ITEMS: NavItem[] = [
   { key: 'damages', label: 'Damage & Adjustment', icon: AlertTriangle, group: 'Stock' },
   { key: 'returns', label: 'Stock Returns', icon: Undo2, group: 'Stock' },
   { key: 'gst-reports', label: 'GST & Tax Reports', icon: FileText, group: 'Reports' },
+  { key: 'company-analytics', label: 'Company Analytics', icon: BarChart3, group: 'Reports' },
   { key: 'recycle-bin', label: 'Recycle Bin', icon: Recycle, group: 'System' },
   { key: 'settings', label: 'Settings & Backup', icon: Settings, group: 'System' },
 ]
@@ -221,6 +225,8 @@ export default function Home() {
         return <StockReturns />
       case 'gst-reports':
         return <GstReports />
+      case 'company-analytics':
+        return <CompanyAnalytics />
       case 'recycle-bin':
         return <RecycleBin />
       case 'settings':

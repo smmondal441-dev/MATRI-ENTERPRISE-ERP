@@ -723,12 +723,14 @@ interface PrintableProps {
 
 // Hardcoded store branding — the printed memo always shows these exact values.
 const STORE_NAME = 'MATRI ENTERPRISE'
-const STORE_SUBTITLE = 'Distributor Of: Too Yumm / Trsna Water'
+const STORE_SUBTITLE = 'Distributor Of : Too Yumn / Trsna Water / Manpasand'
 const STORE_ADDRESS = '51, ELACHI CHAKRABORTYPARA ROAD, KOLKATA-700 151'
 const STORE_GSTIN = '19DSFPM8845F1Z8'
 const STORE_MOBILE = '8777746395 / 9874532121'
-const BANK_DETAILS =
-  'Bank: Bandhan Bank, Rajpur Branch | A/c Name: MATRI ENTERPRISE, A/c No: 20100077079708 | IFSC: BDBL0001028'
+const BANK_NAME = 'Bandhan Bank, Rajpur Branch'
+const BANK_AC_NAME = 'MATRI ENTERPRISE'
+const BANK_AC_NO = '20100077079708'
+const BANK_IFSC = 'BDBL0001028'
 
 function PrintableInvoice({ sale, items, store: _store, customer, onClose }: PrintableProps) {
   // store is intentionally unused — all branding is hardcoded above.
@@ -738,14 +740,7 @@ function PrintableInvoice({ sale, items, store: _store, customer, onClose }: Pri
   const partyAddress = customer?.route_area || ''
   const partyGstin = customer?.gstin || ''
 
-  // v6 — Detect whether GST was actually applied for this sale.
-  // GST is considered "off" if every line item has gst_percent = 0 (which the
-  // POS sets when the user disables the Apply GST switch). In that case we
-  // show the CGST/SGST rows as "— @ 0%" and Grand Total equals Total Amount.
   const anyGstApplied = items.some((it) => it.gst_percent > 0)
-  // Use the first item's gst_percent as the displayed rate (uniform across the
-  // bill when "Custom GST %" was used; otherwise reflects the per-product rate
-  // of the first line — close enough for the slip header).
   const gstPercentForDisplay = items[0]?.gst_percent ?? 0
   const gstHalfPct = gstPercentForDisplay / 2
 
@@ -762,152 +757,141 @@ function PrintableInvoice({ sale, items, store: _store, customer, onClose }: Pri
           </Button>
         </div>
 
-        {/* ============ PRINTABLE AREA — A5 MEMO SLIP ============ */}
-        {/* max-width: 148mm = A5 width. Compact padding + small fonts. */}
+        {/* ============ PRINTABLE AREA — COMPACT TAX MEMO ============ */}
         <div
           id="printable-invoice"
-          className="print-area memo-slip rounded-lg bg-white font-sans text-black"
-          style={{ maxWidth: '148mm', padding: '6mm 8mm' }}
+          className="print-area memo-slip rounded-lg bg-white text-black"
+          style={{ maxWidth: '148mm', padding: '4mm 6mm' }}
         >
-          {/* ---------- 1. HEADER ---------- */}
-          <div className="border-b-2 border-black pb-2 text-center">
-            <div className="text-[10px] font-bold uppercase tracking-[0.3em]">
-              TAX INVOICE
+          {/* ---------- 1. HEADER (compact, centered) ---------- */}
+          <div className="text-center leading-tight">
+            {/* Top row: TAX INVOICE (left) + Date (right) */}
+            <div className="flex items-start justify-between text-[10px] font-bold uppercase">
+              <span>TAX INVOICE</span>
+              <span>Date : {formatDate(sale.date)}</span>
             </div>
-            <div className="mt-0.5 text-2xl font-extrabold uppercase tracking-wide leading-tight">
+            {/* Main title */}
+            <div className="mt-0.5 text-2xl font-extrabold uppercase tracking-wide leading-none">
               {STORE_NAME}
             </div>
-            <div className="mt-0.5 text-[11px] font-semibold italic">
-              {STORE_SUBTITLE}
+            {/* CRITICAL: Subtitle inside a thick black box */}
+            <div className="mt-1">
+              <span className="border-2 border-black px-3 py-0.5 text-[10px] font-bold">
+                {STORE_SUBTITLE}
+              </span>
             </div>
+            {/* Address */}
             <div className="mt-1 text-[10px] font-medium leading-tight">
               {STORE_ADDRESS}
             </div>
+            {/* GSTIN + Mobile on one line */}
             <div className="mt-0.5 text-[10px] leading-tight">
-              <span className="font-semibold">GSTIN:</span>{' '}
+              <span className="font-bold">GSTIN:</span>{' '}
               <span className="font-mono">{STORE_GSTIN}</span>
               <span className="mx-2">·</span>
-              <span className="font-semibold">Mobile:</span> {STORE_MOBILE}
+              <span className="font-bold">Mobile:</span> {STORE_MOBILE}
             </div>
           </div>
 
-          {/* ---------- 2. BILL INFO (Party + Invoice meta) ---------- */}
-          <div className="mt-2 grid grid-cols-2 gap-2 text-[10px]">
-            <div className="border border-black p-1.5">
-              <div className="font-semibold uppercase tracking-wide">
-                Party Name &amp; Address:
-              </div>
-              <div className="font-semibold leading-tight">{partyName}</div>
-              {partyAddress && <div className="leading-tight">{partyAddress}</div>}
-              <div className="mt-0.5">
-                <span className="font-semibold">Party GST No:</span>{' '}
-                <span className="font-mono">{partyGstin || '—'}</span>
-              </div>
+          {/* ---------- 2. CUSTOMER & INVOICE DETAILS (bordered grid) ---------- */}
+          <div className="mt-1.5 grid grid-cols-2 text-[10px] border-2 border-black">
+            {/* Left: Party details */}
+            <div className="border-r-2 border-black p-1 leading-tight">
+              <div><span className="font-bold">Party Name :</span> {partyName}</div>
+              <div><span className="font-bold">Address :</span> {partyAddress || '—'}</div>
+              <div><span className="font-bold">Party GST No. :</span> <span className="font-mono">{partyGstin || '—'}</span></div>
             </div>
-            <div className="border border-black p-1.5 text-right">
-              <div className="leading-tight">
-                <span className="font-semibold">Invoice No:</span>{' '}
-                <span className="font-mono font-bold">{sale.invoice_no}</span>
-              </div>
-              <div className="leading-tight">
-                <span className="font-semibold">Date:</span>{' '}
-                <span className="font-medium">{formatDate(sale.date)}</span>
-              </div>
-              <div className="mt-0.5 leading-tight">
-                <span className="font-semibold">Mode:</span>{' '}
-                <span className="font-medium">{sale.payment_mode}</span>
-              </div>
+            {/* Right: Invoice meta */}
+            <div className="p-1 text-right leading-tight">
+              <div><span className="font-bold">Invoice No. :</span> <span className="font-mono font-bold">{sale.invoice_no}</span></div>
+              <div><span className="font-bold">Invoice Date :</span> {formatDate(sale.date)}</div>
             </div>
           </div>
 
-          {/* ---------- 3. ITEMS TABLE ---------- */}
-          <table className="memo-table mt-2 w-full border-collapse text-[9.5px]">
+          {/* ---------- 3. ITEM TABLE (solid black borders) ---------- */}
+          <table className="memo-table mt-1.5 w-full border-collapse text-[9.5px]">
             <thead>
-              <tr className="border border-black bg-gray-100 font-bold uppercase">
-                <th className="border border-black px-1.5 py-1 text-left">
+              <tr className="border-2 border-black bg-gray-100 font-bold uppercase">
+                <th className="border border-black px-1 py-0.5 text-left" style={{ width: '40%' }}>
                   DESCRIPTION OF GOODS
                 </th>
-                <th className="border border-black px-1.5 py-1 text-center">HSN</th>
-                <th className="border border-black px-1.5 py-1 text-right">Qnty</th>
-                <th className="border border-black px-1.5 py-1 text-right">Rate</th>
-                <th className="border border-black px-1.5 py-1 text-right">AMOUNT</th>
+                <th className="border border-black px-1 py-0.5 text-center" style={{ width: '12%' }}>HSN Code</th>
+                <th className="border border-black px-1 py-0.5 text-right" style={{ width: '12%' }}>Qnty.</th>
+                <th className="border border-black px-1 py-0.5 text-right" style={{ width: '15%' }}>Rate</th>
+                <th className="border border-black px-1 py-0.5 text-right" style={{ width: '21%' }}>AMOUNT</th>
               </tr>
             </thead>
             <tbody>
               {items.map((it, i) => (
                 <tr key={i} className="border border-black">
-                  <td className="border border-black px-1.5 py-0.5">
-                    <div className="font-medium leading-tight">{it.product_name}</div>
-                    <div className="font-mono text-[8px] text-gray-700 leading-tight">
-                      {it.product_sku}
-                    </div>
+                  <td className="border border-black px-1 py-0.5 leading-tight">
+                    <div className="font-medium">{it.product_name}</div>
                   </td>
-                  <td className="border border-black px-1.5 py-0.5 text-center font-mono leading-tight">
+                  <td className="border border-black px-1 py-0.5 text-center font-mono leading-tight">
                     {it.hsn_code}
                   </td>
-                  <td className="border border-black px-1.5 py-0.5 text-right leading-tight">
+                  <td className="border border-black px-1 py-0.5 text-right leading-tight">
                     {formatNumber(it.quantity_pcs, 0)}
                   </td>
-                  <td className="border border-black px-1.5 py-0.5 text-right leading-tight">
+                  <td className="border border-black px-1 py-0.5 text-right leading-tight">
                     {formatINR(it.rate)}
                   </td>
-                  <td className="border border-black px-1.5 py-0.5 text-right font-medium leading-tight">
+                  <td className="border border-black px-1 py-0.5 text-right font-medium leading-tight">
                     {formatINR(it.taxable_amount)}
                   </td>
                 </tr>
               ))}
-              {/* Fill empty rows for visual continuity on short invoices
-                  (helps the slip look balanced on A5). */}
+              {/* Fill empty rows */}
               {items.length < 8 &&
                 Array.from({ length: 8 - items.length }).map((_, i) => (
                   <tr key={`empty-${i}`} className="border border-black">
-                    <td className="border border-black px-1.5 py-0.5">&nbsp;</td>
-                    <td className="border border-black px-1.5 py-0.5">&nbsp;</td>
-                    <td className="border border-black px-1.5 py-0.5">&nbsp;</td>
-                    <td className="border border-black px-1.5 py-0.5">&nbsp;</td>
-                    <td className="border border-black px-1.5 py-0.5">&nbsp;</td>
+                    <td className="border border-black px-1 py-0.5">&nbsp;</td>
+                    <td className="border border-black px-1 py-0.5">&nbsp;</td>
+                    <td className="border border-black px-1 py-0.5">&nbsp;</td>
+                    <td className="border border-black px-1 py-0.5">&nbsp;</td>
+                    <td className="border border-black px-1 py-0.5">&nbsp;</td>
                   </tr>
                 ))}
             </tbody>
           </table>
 
-          {/* ---------- 4. BOTTOM CALCULATION GRID ---------- */}
-          <div className="mt-2 flex justify-end">
-            <table className="memo-table w-3/5 border-collapse text-[10px]">
+          {/* ---------- 4. CALCULATION + RUPEES IN WORDS ---------- */}
+          {/* Left: Rupees in words (bottom-aligned) */}
+          <div className="mt-1 flex items-end justify-between text-[10px]">
+            <div className="flex-1 pr-2 leading-tight">
+              <span className="font-bold">Rupees in words:</span>{' '}
+              <span className="italic">{amountToWords(sale.total_amount)}</span>
+            </div>
+            {/* Right: Calculation block */}
+            <table className="memo-table w-2/5 border-collapse text-[10px]">
               <tbody>
                 <tr className="border border-black">
-                  <td className="border border-black px-1.5 py-0.5 font-semibold">
-                    Total Amount
-                  </td>
-                  <td className="border border-black px-1.5 py-0.5 text-right font-medium">
+                  <td className="border border-black px-1 py-0.5 font-bold">Total Amount</td>
+                  <td className="border border-black px-1 py-0.5 text-right font-medium">
                     {formatINR(sale.subtotal)}
                   </td>
                 </tr>
                 <tr className="border border-black">
-                  <td className="border border-black px-1.5 py-0.5 font-semibold">
-                    {anyGstApplied
-                      ? `Add CGST @ ${formatNumber(gstHalfPct, 2)}%`
-                      : 'Add CGST @ 0%'}
+                  <td className="border border-black px-1 py-0.5 font-bold">
+                    {anyGstApplied ? `Add : CGST    ${formatNumber(gstHalfPct, 2)}%` : 'Add : CGST    0%'}
                   </td>
-                  <td className="border border-black px-1.5 py-0.5 text-right">
+                  <td className="border border-black px-1 py-0.5 text-right">
                     {anyGstApplied ? formatINR(sale.cgst) : '—'}
                   </td>
                 </tr>
                 <tr className="border border-black">
-                  <td className="border border-black px-1.5 py-0.5 font-semibold">
-                    {anyGstApplied
-                      ? `Add SGST @ ${formatNumber(gstHalfPct, 2)}%`
-                      : 'Add SGST @ 0%'}
+                  <td className="border border-black px-1 py-0.5 font-bold">
+                    {anyGstApplied ? `Add : SGST    ${formatNumber(gstHalfPct, 2)}%` : 'Add : SGST    0%'}
                   </td>
-                  <td className="border border-black px-1.5 py-0.5 text-right">
+                  <td className="border border-black px-1 py-0.5 text-right">
                     {anyGstApplied ? formatINR(sale.sgst) : '—'}
                   </td>
                 </tr>
-                <tr className="border border-black bg-gray-100">
-                  <td className="border border-black px-1.5 py-1 text-[12px] font-extrabold">
+                <tr className="border-2 border-black bg-gray-100">
+                  <td className="border border-black px-1 py-1 text-[11px] font-extrabold">
                     Grand Total
                   </td>
-                  <td className="border border-black px-1.5 py-1 text-right text-[12px] font-extrabold">
+                  <td className="border border-black px-1 py-1 text-right text-[11px] font-extrabold">
                     {formatINR(sale.total_amount)}
                   </td>
                 </tr>
@@ -915,28 +899,19 @@ function PrintableInvoice({ sale, items, store: _store, customer, onClose }: Pri
             </table>
           </div>
 
-          {/* Rupees in words */}
-          <div className="mt-1.5 border-t border-black pt-1 text-[10px]">
-            <span className="font-semibold">Rupees in words:</span>{' '}
-            <span className="italic">{amountToWords(sale.total_amount)}</span>
-          </div>
-
-          {/* ---------- 5. FOOTER ---------- */}
-          <div className="mt-2 grid grid-cols-2 gap-3 border-t-2 border-black pt-2 text-[9px]">
-            {/* Bottom-left: Bank Details (hardcoded with A/c Name) */}
+          {/* ---------- 5. FOOTER (Bank + Signature, compact grid) ---------- */}
+          <div className="mt-2 grid grid-cols-2 gap-2 border-t-2 border-black pt-1 text-[9px] leading-tight">
+            {/* Left: Bank Details */}
             <div>
-              <div className="font-bold uppercase tracking-wide">Bank Details:</div>
-              <div className="mt-0.5 leading-snug">{BANK_DETAILS}</div>
-              <div className="mt-1 text-[8px] text-gray-700">
-                * Goods once sold will not be taken back. · Subject to Kolkata
-                jurisdiction. · E. &amp; O.E.
-              </div>
+              <div className="font-bold uppercase">Bank Details:</div>
+              <div>Bank Name &amp; Branch : {BANK_NAME}</div>
+              <div>A/c Name : {BANK_AC_NAME}, A/c No. : {BANK_AC_NO}</div>
+              <div>IFSC Code : {BANK_IFSC}</div>
             </div>
-
-            {/* Bottom-right: Authorised Signatory (hardcoded store name) */}
+            {/* Right: Signature */}
             <div className="text-right">
-              <div className="font-semibold">For, {STORE_NAME}</div>
-              <div className="mt-8 text-[9px] text-gray-700">
+              <div className="font-bold">For, {STORE_NAME}</div>
+              <div className="mt-6 text-[9px] text-gray-700">
                 Authorised Signatory
               </div>
             </div>
