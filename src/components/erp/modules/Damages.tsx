@@ -286,7 +286,7 @@ export function Damages() {
                   p.company_name.toLowerCase().includes(q) ||
                   p.hsn_code.toLowerCase().includes(q)
                 }
-                placeholder="Search damaged product by name / SKU / HSN..."
+
                 searchPlaceholder="Search product..."
                 emptyText="No product matches your search."
                 renderItem={(p) => (
@@ -362,7 +362,7 @@ export function Damages() {
               <Input
                 value={notes}
                 onChange={(e) => setNotes(e.target.value)}
-                placeholder="e.g. Wet transit damage / batch expired"
+
               />
             </Field>
 
@@ -413,7 +413,7 @@ export function Damages() {
                     c.route_area.toLowerCase().includes(q) ||
                     (c.phone || '').toLowerCase().includes(q)
                   }
-                  placeholder="Select customer / store who returned damaged goods..."
+
                   searchPlaceholder="Search customer..."
                   emptyText="No customer matches your search."
                   renderItem={(c) => (
@@ -447,7 +447,7 @@ export function Damages() {
                     b.invoice_no.toLowerCase().includes(q) ||
                     String(b.sale.date).includes(q)
                   }
-                  placeholder="Select invoice to attribute damage to (optional)..."
+
                   searchPlaceholder="Search invoice no..."
                   emptyText="No outstanding bills match."
                   renderItem={(b) => (

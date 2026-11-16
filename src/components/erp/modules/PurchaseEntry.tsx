@@ -55,6 +55,7 @@ import {
   Save,
   X,
   Receipt,
+  Pencil,
 } from 'lucide-react'
 
 // ---- Cart line interface ----
@@ -290,6 +291,77 @@ export function PurchaseEntry() {
     toast({ title: 'Purchase deleted', description: bill })
   }
 
+  // ---- Purchase Edit Dialog state ----
+  const [editPurchase, setEditPurchase] = useState<any | null>(null)
+  const [editBagQty, setEditBagQty] = useState(0)
+  const [editPcsQty, setEditPcsQty] = useState(0)
+  const [editRate, setEditRate] = useState(0)
+  const [editMfg, setEditMfg] = useState('')
+  const [editExpiry, setEditExpiry] = useState('')
+  const [editSaving, setEditSaving] = useState(false)
+
+  const openEdit = (p: any) => {
+    setEditPurchase(p)
+    setEditBagQty(p.bag_qty)
+    setEditPcsQty(p.pcs_qty)
+    setEditRate(p.purchase_rate)
+    setEditMfg(p.mfg_date ?? '')
+    setEditExpiry(p.expiry_date ?? '')
+  }
+
+  const saveEdit = async () => {
+    if (!editPurchase) return
+    setEditSaving(true)
+    try {
+      const prod = (products ?? []).find(
+        (p) => String(p.id) === String(editPurchase.product_id)
+      )
+      const cf = prod?.conversion_factor ?? 1
+      const totalPcs = prod?.is_loose ? editPcsQty : editBagQty * cf + editPcsQty
+      const purchaseRatePerPiece = cf > 0 ? editRate / cf : editRate
+      const taxable = totalPcs * purchaseRatePerPiece
+      const gst = editPurchase.gst_percent
+      const cgst = (taxable * (gst / 2)) / 100
+      const sgst = (taxable * (gst / 2)) / 100
+      const total = taxable + cgst + sgst
+
+      await PurchaseService.update(editPurchase.id!, {
+        bill_no: editPurchase.bill_no,
+        date: editPurchase.date,
+        supplier_name: editPurchase.supplier_name,
+        supplier_gstin: editPurchase.supplier_gstin,
+        product_id: editPurchase.product_id,
+        product_sku: editPurchase.product_sku,
+        product_name: editPurchase.product_name,
+        hsn_code: editPurchase.hsn_code,
+        bag_qty: prod?.is_loose ? 0 : editBagQty,
+        pcs_qty: editPcsQty,
+        total_pcs: totalPcs,
+        purchase_rate: editRate,
+        gst_percent: gst,
+        taxable_amount: taxable,
+        cgst,
+        sgst,
+        total_amount: total,
+        mfg_date: editMfg || undefined,
+        expiry_date: editExpiry || undefined,
+      })
+      toast({
+        title: 'Purchase updated',
+        description: `${editPurchase.bill_no} — stock adjusted`,
+      })
+      setEditPurchase(null)
+    } catch (e) {
+      toast({
+        title: 'Update failed',
+        description: String(e),
+        variant: 'destructive',
+      })
+    } finally {
+      setEditSaving(false)
+    }
+  }
+
   return (
     <div className="space-y-4">
       <PageHeader
@@ -308,21 +380,21 @@ export function PurchaseEntry() {
               <Input
                 value={billNo}
                 onChange={(e) => setBillNo(e.target.value)}
-                placeholder="e.g. PUR-2024-001"
+
               />
             </Field>
             <Field label="Vendor / Company Name *">
               <Input
                 value={supplierName}
                 onChange={(e) => setSupplierName(e.target.value)}
-                placeholder="e.g. Parle Agro Pvt Ltd"
+
               />
             </Field>
             <Field label="Supplier GSTIN">
               <Input
                 value={supplierGstin}
                 onChange={(e) => setSupplierGstin(e.target.value)}
-                placeholder="29ABCDE1234F1Z5"
+
                 className="font-mono text-xs"
               />
             </Field>
@@ -351,7 +423,7 @@ export function PurchaseEntry() {
                 p.company_name.toLowerCase().includes(q) ||
                 p.hsn_code.toLowerCase().includes(q)
               }
-              placeholder="Search & select product to add to purchase cart..."
+
               searchPlaceholder="Search by name / SKU / company / HSN..."
               emptyText="No product matches your search."
               renderItem={(p) => (
@@ -626,14 +698,25 @@ export function PurchaseEntry() {
                         {formatINR(p.total_amount)}
                       </TableCell>
                       <TableCell>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-7 w-7 text-destructive"
-                          onClick={() => removePurchase(p.id!, p.bill_no)}
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </Button>
+                        <div className="flex justify-end gap-1">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-7 w-7"
+                            onClick={() => openEdit(p)}
+                            title="Edit"
+                          >
+                            <Pencil className="h-3.5 w-3.5" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-7 w-7 text-destructive"
+                            onClick={() => removePurchase(p.id!, p.bill_no)}
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </Button>
+                        </div>
                       </TableCell>
                     </TableRow>
                   ))}
@@ -643,6 +726,127 @@ export function PurchaseEntry() {
           )}
         </CardContent>
       </Card>
+
+      {/* ---- Purchase Edit Dialog ---- */}
+      {editPurchase && (
+        <div className="no-print fixed inset-0 z-[100] flex items-center justify-center bg-black/50 p-4">
+          <div className="w-full max-w-lg rounded-lg bg-card p-5 shadow-2xl">
+            <div className="mb-3 flex items-center justify-between">
+              <div>
+                <h3 className="text-base font-semibold">Edit Purchase</h3>
+                <p className="text-xs text-muted-foreground">
+                  {editPurchase.bill_no} · {editPurchase.product_name}
+                </p>
+              </div>
+              <Button variant="ghost" size="icon" onClick={() => setEditPurchase(null)}>
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              {(() => {
+                const prod = (products ?? []).find(
+                  (p) => String(p.id) === String(editPurchase.product_id)
+                )
+                const isLoose = prod?.is_loose
+                const cf = prod?.conversion_factor ?? 1
+                const totalPcs = isLoose ? editPcsQty : editBagQty * cf + editPcsQty
+                const perPiece = cf > 0 ? editRate / cf : editRate
+                const taxable = totalPcs * perPiece
+                const gst = editPurchase.gst_percent
+                const cgst = (taxable * (gst / 2)) / 100
+                const sgst = (taxable * (gst / 2)) / 100
+                const total = taxable + cgst + sgst
+                return (
+                  <>
+                    {isLoose ? (
+                      <Field label={`Qty (${prod?.base_unit ?? 'Kg'})`}>
+                        <Input
+                          type="number"
+                          min={0}
+                          step="0.001"
+                          value={editPcsQty}
+                          onChange={(e) => setEditPcsQty(Number(e.target.value))}
+                        />
+                      </Field>
+                    ) : (
+                      <>
+                        <Field label={`Bag Qty (1 Bag = ${cf} Pcs)`}>
+                          <Input
+                            type="number"
+                            min={0}
+                            value={editBagQty}
+                            onChange={(e) => setEditBagQty(Number(e.target.value))}
+                          />
+                        </Field>
+                        <Field label="Extra Pcs">
+                          <Input
+                            type="number"
+                            min={0}
+                            value={editPcsQty}
+                            onChange={(e) => setEditPcsQty(Number(e.target.value))}
+                          />
+                        </Field>
+                      </>
+                    )}
+                    <Field label={`Purchase Rate (per ${isLoose ? prod?.base_unit : prod?.outer_unit})`}>
+                      <Input
+                        type="number"
+                        min={0}
+                        step="0.01"
+                        value={editRate}
+                        onChange={(e) => setEditRate(Number(e.target.value))}
+                      />
+                    </Field>
+                    <Field label="MFG Date">
+                      <Input
+                        type="date"
+                        value={editMfg}
+                        onChange={(e) => setEditMfg(e.target.value)}
+                      />
+                    </Field>
+                    <Field label="Expiry Date">
+                      <Input
+                        type="date"
+                        value={editExpiry}
+                        onChange={(e) => setEditExpiry(e.target.value)}
+                      />
+                    </Field>
+                    <div className="col-span-2 rounded-md border border-border bg-muted/30 p-2 text-xs">
+                      <div className="grid grid-cols-3 gap-2">
+                        <div>
+                          <div className="text-[10px] text-muted-foreground">Total Pcs</div>
+                          <div className="font-semibold">{formatNumber(totalPcs, isLoose ? 2 : 0)}</div>
+                        </div>
+                        <div>
+                          <div className="text-[10px] text-muted-foreground">Taxable</div>
+                          <div className="font-semibold">{formatINR(taxable)}</div>
+                        </div>
+                        <div>
+                          <div className="text-[10px] text-muted-foreground">Total</div>
+                          <div className="font-semibold text-primary">{formatINR(total)}</div>
+                        </div>
+                      </div>
+                    </div>
+                  </>
+                )
+              })()}
+            </div>
+            <div className="mt-3 flex justify-end gap-2">
+              <Button variant="outline" onClick={() => setEditPurchase(null)}>
+                Cancel
+              </Button>
+              <Button onClick={saveEdit} disabled={editSaving}>
+                {editSaving ? (
+                  <div className="mr-1 h-4 w-4 animate-spin rounded-full border-2 border-primary-foreground border-t-transparent" />
+                ) : (
+                  <Save className="mr-1 h-4 w-4" />
+                )}
+                Save Changes
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

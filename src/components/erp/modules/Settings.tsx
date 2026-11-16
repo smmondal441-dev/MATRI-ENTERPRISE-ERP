@@ -170,7 +170,7 @@ export function Settings() {
               <Input
                 value={subtitle}
                 onChange={(e) => setSubtitle(e.target.value)}
-                placeholder="e.g. Distributor Of: Too Yumm / Trsna Water"
+
               />
             </Field>
             <div className="grid grid-cols-2 gap-3">
@@ -185,7 +185,7 @@ export function Settings() {
                 <Input
                   value={state}
                   onChange={(e) => setState(e.target.value)}
-                  placeholder="Karnataka (29)"
+
                 />
               </Field>
             </div>
@@ -205,14 +205,14 @@ export function Settings() {
                 value={invoicePrefix}
                 onChange={(e) => setInvoicePrefix(e.target.value)}
                 className="font-mono text-xs"
-                placeholder="INV"
+
               />
             </Field>
             <Field label="Bank Details (printed on invoice footer)">
               <Input
                 value={bankDetails}
                 onChange={(e) => setBankDetails(e.target.value)}
-                placeholder="Bank Name, Branch | A/c No: XXXX | IFSC: XXXX"
+
                 className="text-xs"
               />
             </Field>
@@ -258,7 +258,26 @@ export function Settings() {
               </div>
               {syncState.lastError && (
                 <div className="mt-1 rounded bg-red-100 px-2 py-1 text-red-800">
-                  Last error: {syncState.lastError}
+                  <div className="font-semibold">Sync errors ({syncState.lastSyncErrors?.length ?? 0}):</div>
+                  {/* Show detailed per-record error messages so the user knows
+                      exactly WHICH records failed and WHY — not just a count. */}
+                  {syncState.lastSyncErrors && syncState.lastSyncErrors.length > 0 ? (
+                    <ul className="mt-1 list-disc space-y-0.5 pl-4 text-[11px]">
+                      {syncState.lastSyncErrors.slice(0, 10).map((err, i) => (
+                        <li key={i}>
+                          <strong>{err.entity}</strong>
+                          {err.id != null ? `[${err.id}]` : ''}: {err.message}
+                        </li>
+                      ))}
+                      {syncState.lastSyncErrors.length > 10 && (
+                        <li className="opacity-70">
+                          ...and {syncState.lastSyncErrors.length - 10} more
+                        </li>
+                      )}
+                    </ul>
+                  ) : (
+                    <div className="text-[11px]">{syncState.lastError}</div>
+                  )}
                 </div>
               )}
             </div>

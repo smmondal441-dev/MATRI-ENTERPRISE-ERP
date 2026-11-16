@@ -243,7 +243,7 @@ export function ProductMaster() {
           <div className="relative mb-3 max-w-md">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <Input
-              placeholder="Search by name, SKU, company, HSN..."
+
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               className="pl-9"
@@ -422,35 +422,35 @@ export function ProductMaster() {
               <Input
                 value={form.sku}
                 onChange={(e) => setForm({ ...form, sku: e.target.value })}
-                placeholder="e.g. PARLE-G-001"
+
               />
             </Field>
             <Field label="Company Name *">
               <Input
                 value={form.company_name}
                 onChange={(e) => setForm({ ...form, company_name: e.target.value })}
-                placeholder="e.g. Parle Products"
+
               />
             </Field>
             <Field label="Product Name *" className="sm:col-span-2">
               <Input
                 value={form.name}
                 onChange={(e) => setForm({ ...form, name: e.target.value })}
-                placeholder="e.g. Parle-G Glucose Biscuit"
+
               />
             </Field>
             <Field label="Category">
               <Input
                 value={form.category}
                 onChange={(e) => setForm({ ...form, category: e.target.value })}
-                placeholder="e.g. Biscuits"
+
               />
             </Field>
             <Field label="HSN Code">
               <Input
                 value={form.hsn_code}
                 onChange={(e) => setForm({ ...form, hsn_code: e.target.value })}
-                placeholder="e.g. 1905"
+
               />
             </Field>
             {/* ---- Outer Unit — hidden for loose products (forced = base_unit) ---- */}
@@ -515,7 +515,7 @@ export function ProductMaster() {
               <Input
                 value={form.pack_size}
                 onChange={(e) => setForm({ ...form, pack_size: e.target.value })}
-                placeholder="e.g. 200g / 500ml"
+
               />
             </Field>
             {/* ---- Purchase Rate — label adapts: per-Bag (packaged) vs per-Kg (loose) ---- */}

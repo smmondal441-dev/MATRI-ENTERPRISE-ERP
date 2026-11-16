@@ -144,7 +144,7 @@ export function CustomerMaster() {
           <div className="relative mb-3 max-w-md">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <Input
-              placeholder="Search by name, code, route, phone..."
+
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               className="pl-9"
@@ -240,28 +240,28 @@ export function CustomerMaster() {
               <Input
                 value={form.name}
                 onChange={(e) => setForm({ ...form, name: e.target.value })}
-                placeholder="e.g. Sharma General Store"
+
               />
             </Field>
             <Field label="Route / Area">
               <Input
                 value={form.route_area}
                 onChange={(e) => setForm({ ...form, route_area: e.target.value })}
-                placeholder="e.g. MG Road"
+
               />
             </Field>
             <Field label="Phone Number">
               <Input
                 value={form.phone}
                 onChange={(e) => setForm({ ...form, phone: e.target.value })}
-                placeholder="9876543210"
+
               />
             </Field>
             <Field label="GSTIN">
               <Input
                 value={form.gstin}
                 onChange={(e) => setForm({ ...form, gstin: e.target.value })}
-                placeholder="29ABCDE1234F1Z5"
+
                 className="font-mono text-xs"
               />
             </Field>
@@ -269,7 +269,7 @@ export function CustomerMaster() {
               <Input
                 value={form.bill_number}
                 onChange={(e) => setForm({ ...form, bill_number: e.target.value })}
-                placeholder="Optional reference / bill no."
+
               />
             </Field>
             <Field label="Opening Balance Dues (₹)">

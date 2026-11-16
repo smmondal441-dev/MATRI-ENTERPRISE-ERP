@@ -409,7 +409,7 @@ export function SaleEditDialog({
                     c.route_area.toLowerCase().includes(q) ||
                     (c.phone || '').toLowerCase().includes(q)
                   }
-                  placeholder="Search customer..."
+
                   searchPlaceholder="Search customer..."
                   emptyText="No customer matches your search."
                   renderItem={(c) => (
@@ -501,7 +501,7 @@ export function SaleEditDialog({
                   p.company_name.toLowerCase().includes(q) ||
                   p.hsn_code.toLowerCase().includes(q)
                 }
-                placeholder="Search & select product to add to bill..."
+
                 searchPlaceholder="Search by name / SKU / company / HSN..."
                 emptyText="No product matches your search."
                 renderItem={(p) => (

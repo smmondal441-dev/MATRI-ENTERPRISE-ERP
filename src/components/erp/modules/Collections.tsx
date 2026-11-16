@@ -276,7 +276,7 @@ export function Collections() {
                   c.route_area.toLowerCase().includes(q) ||
                   (c.phone || '').toLowerCase().includes(q)
                 }
-                placeholder="Search customer by name / code / route / phone..."
+
                 searchPlaceholder="Search customer..."
                 emptyText="No customer matches your search."
                 renderItem={(c) => {
@@ -349,7 +349,7 @@ export function Collections() {
               </Select>
             </Field>
             <Field label="Notes">
-              <Input value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Cheque # / UTR" />
+              <Input value={notes} onChange={(e) => setNotes(e.target.value)} />
             </Field>
             <Button className="w-full" onClick={saveCollection}>
               Save Collection
@@ -364,7 +364,7 @@ export function Collections() {
             <div className="relative w-64">
               <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
               <Input
-                placeholder="Search customer..."
+
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 className="h-8 pl-9 text-xs"
@@ -770,7 +770,7 @@ function BillAllocationTable({
               <TableHead className="text-right text-[10px]">Damage Adj.</TableHead>
               {/* Task 2 — Net Payable = Total - Paid - Damage (the amount to allocate) */}
               <TableHead className="text-right text-[10px]">Net Payable</TableHead>
-              <TableHead className="text-right text-[10px]">Allocate ₹</TableHead>
+              <TableHead className="text-right text-[10px]">Paying Now</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -823,7 +823,7 @@ function BillAllocationTable({
                       min={0}
                       step="0.01"
                       value={alloc || ''}
-                      placeholder="0"
+
                       onChange={(e) => {
                         const v = Number(e.target.value) || 0
                         setAllocations((prev) => {

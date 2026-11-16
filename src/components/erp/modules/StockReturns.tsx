@@ -216,7 +216,7 @@ function PurchaseReturnTab() {
               <Input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
             </Field>
             <Field label="Supplier Name *">
-              <Input value={supplierName} onChange={(e) => setSupplierName(e.target.value)} placeholder="e.g. Parle Agro" />
+              <Input value={supplierName} onChange={(e) => setSupplierName(e.target.value)} />
             </Field>
             <Field label="Supplier GSTIN">
               <Input value={supplierGstin} onChange={(e) => setSupplierGstin(e.target.value)} className="font-mono text-xs" />
@@ -236,7 +236,7 @@ function PurchaseReturnTab() {
                   p.company_name.toLowerCase().includes(q) ||
                   p.hsn_code.toLowerCase().includes(q)
                 }
-                placeholder="Search & select product to return to supplier..."
+
                 searchPlaceholder="Search by name / SKU / company / HSN..."
                 emptyText="No product matches your search."
                 renderItem={(p) => (
@@ -272,7 +272,7 @@ function PurchaseReturnTab() {
               <Input type="number" min={0} value={pcsQty} onChange={(e) => setPcsQty(Number(e.target.value))} />
             </Field>
             <Field label="Reason">
-              <Input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="e.g. Defective / Near-expiry" />
+              <Input value={reason} onChange={(e) => setReason(e.target.value)} />
             </Field>
           </div>
 
@@ -514,7 +514,7 @@ function SalesReturnTab() {
                   c.route_area.toLowerCase().includes(q) ||
                   (c.phone || '').toLowerCase().includes(q)
                 }
-                placeholder="Search customer by name / code / route / phone..."
+
                 searchPlaceholder="Search customer..."
                 emptyText="No customer matches your search."
                 renderItem={(c) => (
@@ -543,7 +543,7 @@ function SalesReturnTab() {
                   p.company_name.toLowerCase().includes(q) ||
                   p.hsn_code.toLowerCase().includes(q)
                 }
-                placeholder="Search & select returned product..."
+
                 searchPlaceholder="Search by name / SKU / company / HSN..."
                 emptyText="No product matches your search."
                 renderItem={(p) => (

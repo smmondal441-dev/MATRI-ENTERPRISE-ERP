@@ -653,6 +653,79 @@ export const PurchaseService = {
     return createdIds
   },
 
+  /**
+   * Edit an existing Purchase row in place — mirrors SaleService.update().
+   * Strategy:
+   *   1. Load the existing purchase.
+   *   2. REVERT old stock: subtract old total_pcs from product.opening_stock_pcs.
+   *   3. UPDATE the purchase row with new qty/rate/GST/date/mfg/expiry.
+   *   4. APPLY new stock: add new total_pcs to product.opening_stock_pcs.
+   *   5. Update product's purchase rate to the new rate (latest batch wins).
+   *   6. Mark purchase + product isSynced=false.
+   * All in one Dexie transaction — atomic rollback on failure.
+   */
+  async update(id: number, patch: Omit<Purchase, 'id' | 'created_at'>): Promise<number> {
+    await db.transaction('rw', db.purchases, db.products, async () => {
+      const existing = await db.purchases.get(id)
+      if (!existing) throw new Error(`Purchase ${id} not found — cannot edit`)
+
+      // Step 1: revert old stock
+      const prod = await db.products.get(existing.product_id)
+      if (prod) {
+        await db.products.update(existing.product_id, {
+          opening_stock_pcs: Math.max(0, prod.opening_stock_pcs - existing.total_pcs),
+          isSynced: false,
+          synced_at: null,
+        })
+      }
+
+      // Step 2: update the purchase row
+      const cf = prod ? Number(prod.conversion_factor) || 1 : 1
+      const newTotalPcs = patch.total_pcs
+      const newPerPiece = cf > 0 ? patch.purchase_rate / cf : patch.purchase_rate
+      await db.purchases.update(id, {
+        bill_no: patch.bill_no,
+        date: isoBusinessDate(patch.date),
+        supplier_name: patch.supplier_name,
+        supplier_gstin: patch.supplier_gstin ?? undefined,
+        product_id: patch.product_id,
+        product_sku: patch.product_sku,
+        product_name: patch.product_name,
+        hsn_code: patch.hsn_code,
+        bag_qty: patch.bag_qty,
+        pcs_qty: patch.pcs_qty,
+        total_pcs: newTotalPcs,
+        purchase_rate: patch.purchase_rate,
+        gst_percent: patch.gst_percent,
+        taxable_amount: patch.taxable_amount,
+        cgst: patch.cgst,
+        sgst: patch.sgst,
+        total_amount: patch.total_amount,
+        mfg_date: isoNullableBusinessDate(patch.mfg_date),
+        expiry_date: isoNullableBusinessDate(patch.expiry_date),
+        isSynced: false,
+        synced_at: null,
+      })
+
+      // Step 3: apply new stock + update product's purchase rate
+      if (prod) {
+        await db.products.update(patch.product_id, {
+          opening_stock_pcs: prod.opening_stock_pcs - existing.total_pcs + newTotalPcs,
+          // Latest batch rate wins
+          purchase_rate_per_outer_unit: patch.purchase_rate,
+          purchase_rate_per_piece: newPerPiece,
+          purchase_rate: patch.purchase_rate,
+          purchase_rate_per_pcs: newPerPiece,
+          isSynced: false,
+          synced_at: null,
+        })
+      }
+    })
+    scheduleSync('purchases')
+    scheduleSync('products')
+    return id
+  },
+
   async remove(id: number): Promise<void> {
     const purchase = await db.purchases.get(id)
     if (!purchase) return
@@ -664,7 +737,7 @@ export const PurchaseService = {
       const prod = await db.products.get(purchase.product_id)
       if (prod) {
         await db.products.update(purchase.product_id, {
-          opening_stock_pcs: prod.opening_stock_pcs - purchase.total_pcs,
+          opening_stock_pcs: Math.max(0, prod.opening_stock_pcs - purchase.total_pcs),
           isSynced: false,
           synced_at: null,
         })
@@ -815,7 +888,7 @@ export const SaleService = {
         const prod = await db.products.get(it.product_id)
         if (prod) {
           await db.products.update(it.product_id, {
-            opening_stock_pcs: prod.opening_stock_pcs - it.quantity_pcs,
+            opening_stock_pcs: Math.max(0, prod.opening_stock_pcs - it.quantity_pcs),
             isSynced: false,
             synced_at: null,
           })
@@ -913,7 +986,10 @@ export const SaleService = {
           const prod = await db.products.get(it.product_id)
           if (prod) {
             await db.products.update(it.product_id, {
-              opening_stock_pcs: prod.opening_stock_pcs - it.quantity_pcs,
+              opening_stock_pcs: Math.max(
+                0,
+                prod.opening_stock_pcs - it.quantity_pcs
+              ),
               isSynced: false,
               synced_at: null,
             })
@@ -1546,7 +1622,7 @@ export const DamageService = {
       // Store damages are tracked separately and do NOT reduce good inventory.
       if (prod && source === 'godown') {
         await db.products.update(d.product_id, {
-          opening_stock_pcs: prod.opening_stock_pcs - d.total_pcs,
+          opening_stock_pcs: Math.max(0, prod.opening_stock_pcs - d.total_pcs),
           isSynced: false,
           synced_at: null,
         })
@@ -1633,7 +1709,7 @@ export const PurchaseReturnService = {
       // Decrement product stock + mark un-synced
       if (prod) {
         await db.products.update(r.product_id, {
-          opening_stock_pcs: prod.opening_stock_pcs - r.total_pcs,
+          opening_stock_pcs: Math.max(0, prod.opening_stock_pcs - r.total_pcs),
           isSynced: false,
           synced_at: null,
         })
@@ -1725,7 +1801,7 @@ export const SalesReturnService = {
         const prod = await db.products.get(ret.product_id)
         if (prod) {
           await db.products.update(ret.product_id, {
-            opening_stock_pcs: prod.opening_stock_pcs - ret.total_pcs,
+            opening_stock_pcs: Math.max(0, prod.opening_stock_pcs - ret.total_pcs),
             isSynced: false,
             synced_at: null,
           })

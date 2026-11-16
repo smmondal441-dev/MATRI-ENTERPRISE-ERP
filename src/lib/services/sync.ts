@@ -41,18 +41,17 @@ export type EntityName =
 export interface SyncState {
   isOnline: boolean
   isSyncing: boolean
-  // 2-Way Sync — distinct flags for push vs pull so the UI badge can show
-  // which phase is running ("Pushing..." vs "Pulling...").
   isPushing: boolean
   isPulling: boolean
   pendingCounts: Record<EntityName, number>
   totalPending: number
   lastSyncAt: string | null
-  // When was the last successful PULL from the server. Stored in the meta
-  // table so it survives page refresh. The boot sequence uses this to decide
-  // whether to re-pull on reopen (>5 min stale → pull).
   lastPullAt: string | null
   lastError: string | null
+  // Detailed per-record error messages from the last push attempt — so the
+  // Settings UI can show exactly WHICH records failed and WHY, instead of
+  // just "2 errors". Each entry: { entity, id?, message }.
+  lastSyncErrors: { entity: string; id?: number | string; message: string }[]
 }
 
 type SyncStateListener = (state: SyncState) => void
@@ -82,6 +81,7 @@ const STATE: SyncState = {
   lastSyncAt: null,
   lastPullAt: null,
   lastError: null,
+  lastSyncErrors: [],
 }
 
 const listeners = new Set<SyncStateListener>()
@@ -366,11 +366,27 @@ export async function syncAllPending(): Promise<{
     }
 
     const remainingCounts = await getPendingCounts()
+    // Store detailed error messages (not just a count) so the Settings UI
+    // can show exactly WHICH records failed and WHY. This makes the "stuck
+    // record" problem self-diagnosing — the user sees "products[123]:
+    // column 'is_deleted' does not exist" instead of just "1 errors".
+    const errorMessages = json.errors.map((e) => ({
+      entity: e.entity,
+      id: e.id,
+      message: (e.message ?? 'unknown error').slice(0, 200),
+    }))
+    const errorSummary =
+      errorMessages.length > 0
+        ? errorMessages
+            .map((e) => `${e.entity}[${e.id ?? '?'}]: ${e.message.slice(0, 80)}`)
+            .join('; ')
+        : null
     setState({
       isSyncing: false,
       pendingCounts: remainingCounts,
       lastSyncAt: new Date().toISOString(),
-      lastError: json.errors.length > 0 ? `${json.errors.length} errors` : null,
+      lastError: errorSummary,
+      lastSyncErrors: errorMessages,
     })
 
     return { syncedCounts, errors: json.errors }
