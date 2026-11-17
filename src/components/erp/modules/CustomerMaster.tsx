@@ -10,6 +10,13 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
+import {
   Dialog,
   DialogContent,
   DialogHeader,
@@ -37,6 +44,7 @@ interface FormState {
   gstin: string
   bill_number: string
   opening_balance: number
+  customer_type: 'Shop' | 'Household'
 }
 
 const EMPTY: FormState = {
@@ -47,6 +55,7 @@ const EMPTY: FormState = {
   gstin: '',
   bill_number: '',
   opening_balance: 0,
+  customer_type: 'Shop',
 }
 
 export function CustomerMaster() {
@@ -85,6 +94,7 @@ export function CustomerMaster() {
       gstin: c.gstin ?? '',
       bill_number: c.bill_number ?? '',
       opening_balance: c.opening_balance,
+      customer_type: (c.customer_type as 'Shop' | 'Household') ?? 'Shop',
     })
     setEditingId(c.id ?? null)
     setOpen(true)
@@ -164,6 +174,7 @@ export function CustomerMaster() {
                   <TableRow>
                     <TableHead>Code</TableHead>
                     <TableHead>Party Name</TableHead>
+                    <TableHead>Type</TableHead>
                     <TableHead>Route / Area</TableHead>
                     <TableHead>Phone</TableHead>
                     <TableHead>Bill No.</TableHead>
@@ -179,6 +190,11 @@ export function CustomerMaster() {
                         {c.customer_id}
                       </TableCell>
                       <TableCell className="font-medium">{c.name}</TableCell>
+                      <TableCell>
+                        <span className={`inline-flex rounded-full px-2 py-0.5 text-[10px] font-semibold ${c.customer_type === 'Household' ? 'bg-purple-100 text-purple-700' : 'bg-sky-100 text-sky-700'}`}>
+                          {c.customer_type ?? 'Shop'}
+                        </span>
+                      </TableCell>
                       <TableCell className="text-xs">{c.route_area || '—'}</TableCell>
                       <TableCell className="text-xs">{c.phone || '—'}</TableCell>
                       <TableCell className="font-mono text-xs">
@@ -280,6 +296,20 @@ export function CustomerMaster() {
                   setForm({ ...form, opening_balance: Number(e.target.value) })
                 }
               />
+            </Field>
+            <Field label="Customer Type">
+              <Select
+                value={form.customer_type}
+                onValueChange={(v: 'Shop' | 'Household') =>
+                  setForm({ ...form, customer_type: v })
+                }
+              >
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="Shop">Shop</SelectItem>
+                  <SelectItem value="Household">Household</SelectItem>
+                </SelectContent>
+              </Select>
             </Field>
           </div>
           <DialogFooter>

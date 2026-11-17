@@ -204,6 +204,7 @@ async function upsertCustomer(rec: any): Promise<number> {
     openingBalance: num(rec.opening_balance),
     billNumber: nullableStr(rec.bill_number),
     isDeleted: Boolean(rec.is_deleted ?? false),
+    customerType: nullableStr(rec.customer_type),
     createdAt: dateOrNow(rec.created_at),
     syncedAt: new Date(),
   }
@@ -270,6 +271,29 @@ async function upsertSale(rec: any): Promise<number> {
     createdAt: dateOrNow(rec.created_at),
     syncedAt: new Date(),
   }
+
+  // ---- CRITICAL: Delete orphaned sale_items before upserting ----
+  // When a sale is edited locally, Dexie deletes old items + inserts new ones.
+  // The new items get pushed here via upsertSaleItem(). But the OLD items
+  // (deleted from Dexie) are never pushed as "deleted" → they remain in
+  // Turso as orphans. When another device pulls, it gets BOTH old + new →
+  // duplicated/inflated totals.
+  //
+  // Fix: before the upsert, delete ALL existing sale_items for this sale.
+  // The new items will be re-inserted by upsertSaleItem() calls that follow
+  // in the same batch. This is a "delete-then-insert" pattern that ensures
+  // the server's sale_items always match the client's current state.
+  try {
+    await db.saleItem.deleteMany({
+      where: { saleLocalId: localId },
+    })
+    console.log(`[sync/push] Cleared old sale_items for sale localId=${localId}`)
+  } catch (e: any) {
+    // Non-fatal: if the delete fails (e.g. table doesn't exist yet),
+    // continue with the upsert. The new items will still be inserted.
+    console.warn(`[sync/push] Failed to clear old sale_items for sale ${localId}:`, e?.message)
+  }
+
   await db.sale.upsert({
     where: { localId },
     create: data,

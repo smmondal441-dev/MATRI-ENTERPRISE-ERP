@@ -79,6 +79,7 @@ model Customer {
   openingBalance  Float    @map("opening_balance")
   billNumber      String?  @map("bill_number")
   isDeleted       Boolean  @default(false) @map("is_deleted")
+  customerType    String?  @map("customer_type")
   createdAt       DateTime @map("created_at")
   syncedAt        DateTime? @map("synced_at")
   @@map("customers")

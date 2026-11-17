@@ -302,6 +302,33 @@ export function SaleEditDialog({
       prev.map((l) => (l.uid === uid ? { ...l, rate: Math.max(0, rate) } : l))
     )
   }
+
+  // ---- Rate validation (prevent decimal typos like 347 instead of 3.47) ----
+  // For each cart line, validate: 0 < rate <= product's MRP.
+  // The MRP (Maximum Retail Price) is approximated by the product's
+  // selling_rate_per_piece × 2 (2x markup as a safety ceiling). If the
+  // product has no selling rate, we use a flat ₹10000 ceiling.
+  // This prevents absurd amounts from being saved due to human typos.
+  const rateErrors = useMemo(() => {
+    const errors: Record<string, string> = {}
+    for (const line of cart) {
+      if (line.rate <= 0) {
+        errors[line.uid] = 'Rate must be > 0'
+      } else {
+        // MRP ceiling: 2× the product's default selling rate as a sanity check.
+        // If the user intentionally sets a higher rate, they can override by
+        // confirming, but the Save button is disabled until they fix it.
+        const defaultRate = getSellingRatePerPiece(line.product)
+        const mrpCeiling = defaultRate > 0 ? defaultRate * 2 : 10000
+        if (line.rate > mrpCeiling) {
+          errors[line.uid] = `Rate ₹${line.rate} seems too high (expected ≤ ₹${mrpCeiling.toFixed(2)})`
+        }
+      }
+    }
+    return errors
+  }, [cart])
+
+  const hasRateErrors = Object.keys(rateErrors).length > 0
   const removeLine = (uid: string) => {
     setCart((prev) => prev.filter((l) => l.uid !== uid))
   }
@@ -319,6 +346,15 @@ export function SaleEditDialog({
       toast({
         title: 'Empty cart',
         description: 'Add at least one product.',
+        variant: 'destructive',
+      })
+      return
+    }
+    // Block save if any line has a rate validation error
+    if (hasRateErrors) {
+      toast({
+        title: 'Rate validation failed',
+        description: 'Fix the highlighted rates before saving.',
         variant: 'destructive',
       })
       return
@@ -602,8 +638,15 @@ export function SaleEditDialog({
                               onChange={(e) =>
                                 updateLineRate(line.uid, Number(e.target.value))
                               }
-                              className="h-8 w-24 text-right text-xs"
+                              className={`h-8 w-24 text-right text-xs ${
+                                rateErrors[line.uid] ? 'border-red-500 text-red-700' : ''
+                              }`}
                             />
+                            {rateErrors[line.uid] && (
+                              <div className="mt-0.5 text-[9px] font-medium text-red-600">
+                                {rateErrors[line.uid]}
+                              </div>
+                            )}
                           </TableCell>
                           <TableCell className="text-right text-xs">
                             {formatINR(item.taxable_amount)}
@@ -685,7 +728,7 @@ export function SaleEditDialog({
                 >
                   <X className="mr-1 h-4 w-4" /> Cancel
                 </Button>
-                <Button onClick={handleSave} disabled={saving}>
+                <Button onClick={handleSave} disabled={saving || hasRateErrors}>
                   {saving ? (
                     <>
                       <div className="mr-1 h-4 w-4 animate-spin rounded-full border-2 border-primary-foreground border-t-transparent" />

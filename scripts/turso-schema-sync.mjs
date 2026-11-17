@@ -125,6 +125,7 @@ const EXPECTED_SCHEMA = {
     { name: 'opening_balance', sqlType: 'REAL', nullable: false },
     { name: 'bill_number', sqlType: 'TEXT', nullable: true },
     { name: 'is_deleted', sqlType: 'INTEGER', nullable: false, default: '0' },
+    { name: 'customer_type', sqlType: 'TEXT', nullable: true },
     { name: 'created_at', sqlType: 'TEXT', nullable: false },
     { name: 'synced_at', sqlType: 'TEXT', nullable: true },
   ],

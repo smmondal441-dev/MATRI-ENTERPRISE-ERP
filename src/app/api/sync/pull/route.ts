@@ -500,6 +500,7 @@ export async function GET() {
     opening_balance: safeNum(pick(c, 'openingBalance', 'opening_balance', 0)),
     bill_number: safeStrNull(pick(c, 'billNumber', 'bill_number', null)) ?? undefined,
     is_deleted: Boolean(pick(c, 'isDeleted', 'is_deleted', false)),
+    customer_type: safeStrNull(pick(c, 'customerType', 'customer_type', null)) ?? undefined,
     created_at: safeISO(pick(c, 'createdAt', 'created_at', null)),
     isSynced: true,
     synced_at: safeISONullable(pick(c, 'syncedAt', 'synced_at', null)),

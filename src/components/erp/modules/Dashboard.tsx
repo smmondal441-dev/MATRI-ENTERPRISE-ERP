@@ -1,11 +1,13 @@
 'use client'
 
-import { useMemo } from 'react'
-import { useSales, usePurchases, useCollections, useDues } from '@/lib/hooks/use-erp'
+import { useMemo, useState } from 'react'
+import { useSales, usePurchases, useCollections, useDues, useCustomers } from '@/lib/hooks/use-erp'
 import { formatINR, formatNumber, formatDate, todayISO } from '@/lib/utils/format'
 import { StatCard } from '@/components/erp/StatCard'
 import { PageHeader } from '@/components/erp/EmptyState'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Switch } from '@/components/ui/switch'
+import { Label } from '@/components/ui/label'
 import {
   Banknote,
   ShoppingCart,
@@ -39,11 +41,32 @@ export function Dashboard({ onNavigate }: Props) {
   const purchases = usePurchases()
   const collections = useCollections()
   const dues = useDues()
+  const customers = useCustomers()
 
   const today = todayISO()
+  const [householdOnly, setHouseholdOnly] = useState(false)
+
+  // Build customerId → customer_type lookup for Household filtering
+  const customerTypeMap = useMemo(() => {
+    const map = new Map<string, string>()
+    for (const c of customers ?? []) {
+      if (c.id != null) {
+        map.set(String(c.id), c.customer_type ?? 'Shop')
+      }
+    }
+    return map
+  }, [customers])
+
+  // Filter sales by customer type when household toggle is ON
+  const filteredSales = useMemo(() => {
+    if (!householdOnly) return sales ?? []
+    return (sales ?? []).filter(
+      (s) => customerTypeMap.get(String(s.customer_id)) === 'Household'
+    )
+  }, [sales, householdOnly, customerTypeMap])
 
   const stats = useMemo(() => {
-    const todaySales = (sales ?? []).filter((s) => s.date === today)
+    const todaySales = filteredSales.filter((s) => s.date === today)
     const todayPurchases = (purchases ?? []).filter((p) => p.date === today)
     const todayCollections = (collections ?? []).filter((c) => c.date === today)
 
@@ -62,7 +85,7 @@ export function Dashboard({ onNavigate }: Props) {
       billCount: todaySales.length,
       purchaseCount: todayPurchases.length,
     }
-  }, [sales, purchases, collections, dues, today])
+  }, [filteredSales, purchases, collections, dues, today])
 
   // Last 7-day chart
   const weekData = useMemo(() => {
@@ -71,7 +94,7 @@ export function Dashboard({ onNavigate }: Props) {
       const d = new Date()
       d.setDate(d.getDate() - i)
       const iso = d.toISOString().slice(0, 10)
-      const daySales = (sales ?? []).filter((s) => s.date === iso)
+      const daySales = filteredSales.filter((s) => s.date === iso)
       const dayPurchases = (purchases ?? []).filter((p) => p.date === iso)
       days.push({
         label: d.toLocaleDateString('en-IN', { weekday: 'short' }),
@@ -81,7 +104,7 @@ export function Dashboard({ onNavigate }: Props) {
       })
     }
     return days
-  }, [sales, purchases])
+  }, [filteredSales, purchases])
 
   // Top dues customers
   const topDues = useMemo(() => {
@@ -92,8 +115,8 @@ export function Dashboard({ onNavigate }: Props) {
   }, [dues])
 
   const recentSales = useMemo(() => {
-    return (sales ?? []).slice(0, 6)
-  }, [sales])
+    return filteredSales.slice(0, 6)
+  }, [filteredSales])
 
   return (
     <div className="space-y-5">
@@ -101,7 +124,17 @@ export function Dashboard({ onNavigate }: Props) {
         title="Dashboard · Daily Summary"
         description={`Snapshot for ${formatDate(today)} — all data stored locally via IndexedDB.`}
         actions={
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Household Summary toggle */}
+            <div className="flex items-center gap-2 rounded-md border border-border bg-card px-3 py-1.5">
+              <Switch
+                checked={householdOnly}
+                onCheckedChange={setHouseholdOnly}
+              />
+              <Label className="cursor-pointer text-xs" onClick={() => setHouseholdOnly(!householdOnly)}>
+                Household Only
+              </Label>
+            </div>
             <button
               onClick={() => onNavigate('billing')}
               className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90"

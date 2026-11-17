@@ -75,6 +75,9 @@ export interface Customer {
   opening_balance: number // opening dues (positive = customer owes us)
   bill_number?: string // optional customer bill/reference number
   is_deleted?: boolean // Soft Delete
+  // Customer type: 'Shop' (default) or 'Household'. Used by the Dashboard
+  // Household Summary toggle to filter sales by customer type.
+  customer_type?: 'Shop' | 'Household'
   created_at: string
 
   // v5 — Hybrid sync
@@ -442,6 +445,11 @@ export class FmcgDatabase extends Dexie {
       purchases: '++id, bill_no, date, supplier_name, supplier_gstin, product_id, product_sku, created_at, isSynced, is_deleted',
       sales: '++id, invoice_no, date, customer_id, customer_name, payment_mode, created_at, isSynced, is_deleted',
       sale_items: '++id, sale_id, product_id, product_sku, isSynced, is_deleted',
+    })
+    // v11 — Customer type (customer_type). Adds customer_type to the customers
+    // index so the Dashboard can filter Shop vs Household customers.
+    this.version(11).stores({
+      customers: '++id, customer_id, name, route_area, phone, gstin, created_at, isSynced, is_deleted, customer_type',
     })
   }
 }
