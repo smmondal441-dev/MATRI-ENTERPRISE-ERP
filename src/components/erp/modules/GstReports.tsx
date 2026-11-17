@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useMemo } from 'react'
-import { useSales, usePurchases, useSettings, useCustomers } from '@/lib/hooks/use-erp'
+import { useSales, usePurchases, useSettings, useCustomers, useProducts, useAllSaleItems } from '@/lib/hooks/use-erp'
 import {
   formatINR,
   formatDate,
@@ -52,7 +52,7 @@ export function GstReports() {
     <div className="space-y-4">
       <PageHeader
         title="GST & Tax Reports for CA"
-        description="Generate GSTR-1, GSTR-2, and monthly summary for your chartered accountant."
+        description="Generate GSTR-1, GSTR-2, and monthly summary — filterable by company."
       />
       <Tabs defaultValue="gstr1">
         <TabsList className="grid w-full grid-cols-3">
@@ -81,6 +81,88 @@ export function GstReports() {
 }
 
 // ============================================================================
+// Shared helpers — build company lookup maps from Products + SaleItems
+// ============================================================================
+
+/**
+ * Build a productId → company_name lookup from the products list.
+ */
+function useProductCompanyMap() {
+  const products = useProducts()
+  return useMemo(() => {
+    const map = new Map<string, string>()
+    for (const p of products ?? []) {
+      if (p.id != null) {
+        map.set(String(p.id), p.company_name || 'Unknown')
+      }
+    }
+    return map
+  }, [products])
+}
+
+/**
+ * Build a saleId → Set<company_name> lookup from sale_items.
+ * This lets us check if a sale contains at least one product from a given
+ * company (for the company filter).
+ */
+function useSaleCompanyMap() {
+  const allSaleItems = useAllSaleItems()
+  const productCompanyMap = useProductCompanyMap()
+  return useMemo(() => {
+    const map = new Map<string, Set<string>>()
+    for (const si of allSaleItems ?? []) {
+      const sid = String(si.sale_id)
+      const company = productCompanyMap.get(String(si.product_id)) ?? 'Unknown'
+      if (!map.has(sid)) map.set(sid, new Set())
+      map.get(sid)!.add(company)
+    }
+    return map
+  }, [allSaleItems, productCompanyMap])
+}
+
+/**
+ * Build a saleId → sale_items[] lookup from all sale_items.
+ * Used to compute partial (company-specific) amounts for mixed bills.
+ */
+function useSaleItemsMap() {
+  const allSaleItems = useAllSaleItems()
+  return useMemo(() => {
+    const map = new Map<string, any[]>()
+    for (const si of allSaleItems ?? []) {
+      const sid = String(si.sale_id)
+      if (!map.has(sid)) map.set(sid, [])
+      map.get(sid)!.push(si as any)
+    }
+    return map
+  }, [allSaleItems])
+}
+
+/**
+ * Extract unique company names that actually have transactions.
+ * Combines companies from purchases (via product_id) + sales (via sale_items).
+ */
+function useActiveCompanies() {
+  const purchases = usePurchases()
+  const productCompanyMap = useProductCompanyMap()
+  const saleCompanyMap = useSaleCompanyMap()
+
+  return useMemo(() => {
+    const companies = new Set<string>()
+    // From purchases
+    for (const p of purchases ?? []) {
+      companies.add(productCompanyMap.get(String(p.product_id)) ?? 'Unknown')
+    }
+    // From sales (via sale_items → product_id → company)
+    for (const companiesSet of saleCompanyMap.values()) {
+      for (const c of companiesSet) {
+        companies.add(c)
+      }
+    }
+    return Array.from(companies).sort()
+  }, [purchases, productCompanyMap, saleCompanyMap])
+}
+
+// ============================================================================
 // GSTR-1 — outward supplies (sales)
 // ============================================================================
 
@@ -102,44 +184,81 @@ function Gstr1Report() {
   const customers = useCustomers()
   const settings = useSettings()
   const { toast } = useToast()
+  const activeCompanies = useActiveCompanies()
+  const saleCompanyMap = useSaleCompanyMap()
+  const saleItemsMap = useSaleItemsMap()
+  const productCompanyMap = useProductCompanyMap()
 
   const [fromMonth, setFromMonth] = useState(String(new Date().getMonth()))
   const [year, setYear] = useState(String(new Date().getFullYear()))
+  const [company, setCompany] = useState('')
 
   const rows: Gstr1Row[] = useMemo(() => {
     const monthIdx = Number(fromMonth)
+    const companyQuery = company.trim().toLowerCase()
     return (sales ?? []).filter((s) => {
       const d = new Date(s.date)
-      return d.getMonth() === monthIdx && d.getFullYear() === Number(year)
+      if (d.getMonth() !== monthIdx || d.getFullYear() !== Number(year)) return false
+      // Company filter: if a search string is entered, only include
+      // sales that have at least one item from a matching company.
+      if (companyQuery) {
+        const companies = saleCompanyMap.get(String(s.id))
+        if (!companies || ![...companies].some((c) => c.toLowerCase().includes(companyQuery))) return false
+      }
+      return true
     }).flatMap((s) => {
       const cust = (customers ?? []).find(
         (c) => String(c.id) === String(s.customer_id)
       )
-      // We need sale_items but Sales Ledger only stores aggregated; we recompute
-      // from sale subtotals & CGST/SGST split.
-      // For HSN we would need item-level lookup; since the sale has it on items,
-      // we summarize at sale-level (one row per invoice) but show HSN as "—"
-      // because GSTR-1 typically requires item-level HSN, so we also offer
-      // an item-level export below.
       const interState = cust?.gstin && settings?.gstin &&
         cust.gstin.slice(0, 2) !== settings.gstin.slice(0, 2)
-      const igst = interState ? s.cgst + s.sgst : 0
-      const cgst = interState ? 0 : s.cgst
-      const sgst = interState ? 0 : s.sgst
+
+      // ---- PARTIAL BILL CALCULATION (mixed bills) ----
+      let taxableAmount: number
+      let cgst: number
+      let sgst: number
+      let totalAmount: number
+
+      if (companyQuery) {
+        // Sum only the items from companies matching the search string
+        const items = saleItemsMap.get(String(s.id)) ?? []
+        const companyItems = items.filter(
+          (si: any) => {
+            const c = productCompanyMap.get(String(si.product_id)) ?? 'Unknown'
+            return c.toLowerCase().includes(companyQuery)
+          }
+        )
+        taxableAmount = companyItems.reduce((sum: number, si: any) => sum + (si.taxable_amount ?? 0), 0)
+        cgst = companyItems.reduce((sum: number, si: any) => sum + (si.cgst ?? 0), 0)
+        sgst = companyItems.reduce((sum: number, si: any) => sum + (si.sgst ?? 0), 0)
+        totalAmount = companyItems.reduce((sum: number, si: any) => sum + (si.total ?? 0), 0)
+      } else {
+        taxableAmount = s.subtotal
+        cgst = s.cgst
+        sgst = s.sgst
+        totalAmount = s.total_amount
+      }
+
+      const igst = interState ? cgst + sgst : 0
+      if (interState) {
+        cgst = 0
+        sgst = 0
+      }
+
       return [{
         date: s.date,
         invoice_no: s.invoice_no,
         customer_name: s.customer_name,
         customer_gstin: cust?.gstin || '',
         hsn_code: '—',
-        taxable_amount: s.subtotal,
+        taxable_amount: taxableAmount,
         cgst,
         sgst,
         igst,
-        total_amount: s.total_amount,
+        total_amount: totalAmount,
       }]
     })
-  }, [sales, customers, fromMonth, year, settings])
+  }, [sales, customers, fromMonth, year, settings, company, saleCompanyMap, saleItemsMap, productCompanyMap])
 
   const totals = useMemo(() => {
     return rows.reduce(
@@ -159,42 +278,22 @@ function Gstr1Report() {
     const out: (string | number)[][] = [
       ['GSTR-1 — Outward Supplies (Sales)', '', '', '', '', '', '', '', ''],
       ['Period:', `${MONTHS[Number(fromMonth)]} ${year}`],
+      ['Company:', company.trim() || 'All'],
       ['Distributor:', settings?.store_name ?? '', 'GSTIN:', settings?.gstin ?? ''],
       [],
-      [
-        'Date',
-        'Invoice No',
-        'Customer Name',
-        'Customer GSTIN',
-        'HSN',
-        'Taxable Amount',
-        'CGST',
-        'SGST',
-        'IGST',
-        'Total Amount',
-      ],
+      ['Date', 'Invoice No', 'Customer Name', 'Customer GSTIN', 'HSN', 'Taxable Amount', 'CGST', 'SGST', 'IGST', 'Total Amount'],
       ...rows.map((r) => [
-        r.date,
-        r.invoice_no,
-        r.customer_name,
-        r.customer_gstin,
-        r.hsn_code,
-        r.taxable_amount.toFixed(2),
-        r.cgst.toFixed(2),
-        r.sgst.toFixed(2),
-        r.igst.toFixed(2),
-        r.total_amount.toFixed(2),
+        r.date, r.invoice_no, r.customer_name, r.customer_gstin, r.hsn_code,
+        r.taxable_amount.toFixed(2), r.cgst.toFixed(2), r.sgst.toFixed(2),
+        r.igst.toFixed(2), r.total_amount.toFixed(2),
       ]),
       [],
       ['TOTALS', '', '', '', '',
-        totals.taxable.toFixed(2),
-        totals.cgst.toFixed(2),
-        totals.sgst.toFixed(2),
-        totals.igst.toFixed(2),
-        totals.total.toFixed(2),
+        totals.taxable.toFixed(2), totals.cgst.toFixed(2),
+        totals.sgst.toFixed(2), totals.igst.toFixed(2), totals.total.toFixed(2),
       ],
     ]
-    downloadCSV(`GSTR1-${MONTHS[Number(fromMonth)]}-${year}`, out)
+    downloadCSV(`GSTR1-${MONTHS[Number(fromMonth)]}-${year}-${company.trim() || 'All'}`, out)
     toast({ title: 'GSTR-1 CSV downloaded' })
   }
 
@@ -208,11 +307,11 @@ function Gstr1Report() {
           </p>
         </div>
         <Button onClick={exportCsv}>
-          <Download className="mr-1 h-4 w-4" /> Download GSTR-1 CSV / Excel
+          <Download className="mr-1 h-4 w-4" /> Download GSTR-1 CSV
         </Button>
       </CardHeader>
       <CardContent className="space-y-4">
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3 lg:grid-cols-4">
           <Field label="Month">
             <Select value={fromMonth} onValueChange={setFromMonth}>
               <SelectTrigger><SelectValue /></SelectTrigger>
@@ -234,6 +333,12 @@ function Gstr1Report() {
               </SelectContent>
             </Select>
           </Field>
+          <Field label="Company" className="sm:col-span-2">
+            <Input
+              value={company}
+              onChange={(e) => setCompany(e.target.value)}
+            />
+          </Field>
         </div>
 
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
@@ -245,7 +350,7 @@ function Gstr1Report() {
 
         {rows.length === 0 ? (
           <div className="rounded-md bg-muted/40 p-6 text-center text-sm text-muted-foreground">
-            No sales in {MONTHS[Number(fromMonth)]} {year}.
+            No sales in {MONTHS[Number(fromMonth)]} {year}{company.trim() ? ` for "${company}"` : ''}.
           </div>
         ) : (
           <div className="scrollbar-thin overflow-x-auto rounded-md border border-border">
@@ -304,15 +409,28 @@ function Gstr2Report() {
   const purchases = usePurchases()
   const settings = useSettings()
   const { toast } = useToast()
+  const activeCompanies = useActiveCompanies()
+  const productCompanyMap = useProductCompanyMap()
+
   const [month, setMonth] = useState(String(new Date().getMonth()))
   const [year, setYear] = useState(String(new Date().getFullYear()))
+  const [company, setCompany] = useState('')
 
   const rows = useMemo(() => {
+    const companyQuery = company.trim().toLowerCase()
     return (purchases ?? []).filter((p) => {
       const d = new Date(p.date)
-      return d.getMonth() === Number(month) && d.getFullYear() === Number(year)
+      if (d.getMonth() !== Number(month) || d.getFullYear() !== Number(year)) return false
+      // Company filter: case-insensitive substring search on BOTH
+      // the product's company_name AND the purchase's supplier_name
+      if (companyQuery) {
+        const purCompany = productCompanyMap.get(String(p.product_id)) ?? 'Unknown'
+        const supplierName = (p.supplier_name ?? '').toLowerCase()
+        if (!purCompany.toLowerCase().includes(companyQuery) && !supplierName.includes(companyQuery)) return false
+      }
+      return true
     })
-  }, [purchases, month, year])
+  }, [purchases, month, year, company, productCompanyMap])
 
   const totals = useMemo(() => {
     return rows.reduce(
@@ -331,42 +449,23 @@ function Gstr2Report() {
     const out: (string | number)[][] = [
       ['GSTR-2 — Inward Supplies (Purchases) / ITC', '', '', '', '', '', '', ''],
       ['Period:', `${MONTHS[Number(month)]} ${year}`],
+      ['Company:', company.trim() || 'All'],
       ['Distributor:', settings?.store_name ?? '', 'GSTIN:', settings?.gstin ?? ''],
       [],
-      [
-        'Date',
-        'Supplier Invoice No',
-        'Supplier Name',
-        'Supplier GSTIN',
-        'HSN',
-        'Taxable Amount',
-        'CGST',
-        'SGST',
-        'Total Tax',
-        'Total Amount',
-      ],
+      ['Date', 'Supplier Invoice No', 'Supplier Name', 'Supplier GSTIN', 'HSN', 'Taxable Amount', 'CGST', 'SGST', 'Total Tax', 'Total Amount'],
       ...rows.map((r) => [
-        r.date,
-        r.bill_no,
-        r.supplier_name,
-        r.supplier_gstin || '',
-        r.hsn_code,
-        r.taxable_amount.toFixed(2),
-        r.cgst.toFixed(2),
-        r.sgst.toFixed(2),
-        (r.cgst + r.sgst).toFixed(2),
-        r.total_amount.toFixed(2),
+        r.date, r.bill_no, r.supplier_name, r.supplier_gstin || '',
+        r.hsn_code, r.taxable_amount.toFixed(2), r.cgst.toFixed(2),
+        r.sgst.toFixed(2), (r.cgst + r.sgst).toFixed(2), r.total_amount.toFixed(2),
       ]),
       [],
       ['TOTALS', '', '', '', '',
-        totals.taxable.toFixed(2),
-        totals.cgst.toFixed(2),
-        totals.sgst.toFixed(2),
-        (totals.cgst + totals.sgst).toFixed(2),
+        totals.taxable.toFixed(2), totals.cgst.toFixed(2),
+        totals.sgst.toFixed(2), (totals.cgst + totals.sgst).toFixed(2),
         totals.total.toFixed(2),
       ],
     ]
-    downloadCSV(`GSTR2-${MONTHS[Number(month)]}-${year}`, out)
+    downloadCSV(`GSTR2-${MONTHS[Number(month)]}-${year}-${company.trim() || 'All'}`, out)
     toast({ title: 'GSTR-2 CSV downloaded' })
   }
 
@@ -380,11 +479,11 @@ function Gstr2Report() {
           </p>
         </div>
         <Button onClick={exportCsv}>
-          <Download className="mr-1 h-4 w-4" /> Download GSTR-2 CSV / Excel
+          <Download className="mr-1 h-4 w-4" /> Download GSTR-2 CSV
         </Button>
       </CardHeader>
       <CardContent className="space-y-4">
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
           <Field label="Month">
             <Select value={month} onValueChange={setMonth}>
               <SelectTrigger><SelectValue /></SelectTrigger>
@@ -406,6 +505,12 @@ function Gstr2Report() {
               </SelectContent>
             </Select>
           </Field>
+          <Field label="Company">
+            <Input
+              value={company}
+              onChange={(e) => setCompany(e.target.value)}
+            />
+          </Field>
         </div>
 
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
@@ -417,7 +522,7 @@ function Gstr2Report() {
 
         {rows.length === 0 ? (
           <div className="rounded-md bg-muted/40 p-6 text-center text-sm text-muted-foreground">
-            No purchases in {MONTHS[Number(month)]} {year}.
+            No purchases in {MONTHS[Number(month)]} {year}{company.trim() ? ` for "${company}"` : ''}.
           </div>
         ) : (
           <div className="scrollbar-thin overflow-x-auto rounded-md border border-border">
@@ -477,21 +582,65 @@ function MonthlySummary() {
   const purchases = usePurchases()
   const settings = useSettings()
   const { toast } = useToast()
+  const activeCompanies = useActiveCompanies()
+  const productCompanyMap = useProductCompanyMap()
+  const saleCompanyMap = useSaleCompanyMap()
+  const saleItemsMap = useSaleItemsMap()
+
   const [month, setMonth] = useState(String(new Date().getMonth()))
   const [year, setYear] = useState(String(new Date().getFullYear()))
+  const [company, setCompany] = useState('')
 
   const data = useMemo(() => {
+    const companyQuery = company.trim().toLowerCase()
     const sRows = (sales ?? []).filter((s) => {
       const d = new Date(s.date)
-      return d.getMonth() === Number(month) && d.getFullYear() === Number(year)
+      if (d.getMonth() !== Number(month) || d.getFullYear() !== Number(year)) return false
+      if (companyQuery) {
+        const companies = saleCompanyMap.get(String(s.id))
+        if (!companies || ![...companies].some((c) => c.toLowerCase().includes(companyQuery))) return false
+      }
+      return true
     })
     const pRows = (purchases ?? []).filter((p) => {
       const d = new Date(p.date)
-      return d.getMonth() === Number(month) && d.getFullYear() === Number(year)
+      if (d.getMonth() !== Number(month) || d.getFullYear() !== Number(year)) return false
+      if (companyQuery) {
+        const purCompany = productCompanyMap.get(String(p.product_id)) ?? 'Unknown'
+        const supplierName = (p.supplier_name ?? '').toLowerCase()
+        if (!purCompany.toLowerCase().includes(companyQuery) && !supplierName.includes(companyQuery)) return false
+      }
+      return true
     })
-    const outputTaxable = sRows.reduce((s, x) => s + x.subtotal, 0)
-    const outputCGST = sRows.reduce((s, x) => s + x.cgst, 0)
-    const outputSGST = sRows.reduce((s, x) => s + x.sgst, 0)
+
+    // ---- Partial bill calculation for sales ----
+    let outputTaxable: number
+    let outputCGST: number
+    let outputSGST: number
+
+    if (companyQuery) {
+      let taxable = 0, cgst = 0, sgst = 0
+      for (const s of sRows) {
+        const items = saleItemsMap.get(String(s.id)) ?? []
+        const companyItems = items.filter(
+          (si: any) => {
+            const c = productCompanyMap.get(String(si.product_id)) ?? 'Unknown'
+            return c.toLowerCase().includes(companyQuery)
+          }
+        )
+        taxable += companyItems.reduce((sum: number, si: any) => sum + (si.taxable_amount ?? 0), 0)
+        cgst += companyItems.reduce((sum: number, si: any) => sum + (si.cgst ?? 0), 0)
+        sgst += companyItems.reduce((sum: number, si: any) => sum + (si.sgst ?? 0), 0)
+      }
+      outputTaxable = taxable
+      outputCGST = cgst
+      outputSGST = sgst
+    } else {
+      outputTaxable = sRows.reduce((s, x) => s + x.subtotal, 0)
+      outputCGST = sRows.reduce((s, x) => s + x.cgst, 0)
+      outputSGST = sRows.reduce((s, x) => s + x.sgst, 0)
+    }
+
     const inputTaxable = pRows.reduce((s, x) => s + x.taxable_amount, 0)
     const inputCGST = pRows.reduce((s, x) => s + x.cgst, 0)
     const inputSGST = pRows.reduce((s, x) => s + x.sgst, 0)
@@ -501,21 +650,12 @@ function MonthlySummary() {
     const totalInput = inputCGST + inputSGST
     const netGST = totalOutput - totalInput
     return {
-      salesCount: sRows.length,
-      purchaseCount: pRows.length,
-      outputTaxable,
-      outputCGST,
-      outputSGST,
-      inputTaxable,
-      inputCGST,
-      inputSGST,
-      netCGST,
-      netSGST,
-      totalOutput,
-      totalInput,
-      netGST,
+      salesCount: sRows.length, purchaseCount: pRows.length,
+      outputTaxable, outputCGST, outputSGST,
+      inputTaxable, inputCGST, inputSGST,
+      netCGST, netSGST, totalOutput, totalInput, netGST,
     }
-  }, [sales, purchases, month, year])
+  }, [sales, purchases, month, year, company, saleCompanyMap, productCompanyMap, saleItemsMap])
 
   const exportCsv = () => {
     const out: (string | number)[][] = [
@@ -523,6 +663,7 @@ function MonthlySummary() {
       ['Distributor:', settings?.store_name ?? ''],
       ['GSTIN:', settings?.gstin ?? ''],
       ['Period:', `${MONTHS[Number(month)]} ${year}`],
+      ['Company:', company.trim() || 'All'],
       [],
       ['--- OUTPUT (Sales) ---', ''],
       ['Sales Invoices', data.salesCount],
@@ -543,47 +684,8 @@ function MonthlySummary() {
       ['Net SGST', data.netSGST.toFixed(2)],
       ['Net GST (Payable if +ve, Refund if -ve)', data.netGST.toFixed(2)],
     ]
-    downloadCSV(`GST-Summary-${MONTHS[Number(month)]}-${year}`, out)
+    downloadCSV(`GST-Summary-${MONTHS[Number(month)]}-${year}-${company.trim() || 'All'}`, out)
     toast({ title: 'CA Tax Summary CSV downloaded' })
-  }
-
-  const exportTxt = () => {
-    const text = `
-FMCG ERP — Monthly GST Summary (CA Sheet)
-=========================================
-Distributor: ${settings?.store_name ?? ''}
-GSTIN:      ${settings?.gstin ?? ''}
-Period:     ${MONTHS[Number(month)]} ${year}
-
-OUTPUT (Sales)
-- Sales Invoices: ${data.salesCount}
-- Output Taxable: ${formatINR(data.outputTaxable)}
-- Output CGST:    ${formatINR(data.outputCGST)}
-- Output SGST:    ${formatINR(data.outputSGST)}
-- Total Output GST: ${formatINR(data.totalOutput)}
-
-INPUT (Purchases / ITC)
-- Purchase Bills: ${data.purchaseCount}
-- Input Taxable: ${formatINR(data.inputTaxable)}
-- Input CGST (ITC): ${formatINR(data.inputCGST)}
-- Input SGST (ITC): ${formatINR(data.inputSGST)}
-- Total Input GST: ${formatINR(data.totalInput)}
-
-NET GST (Payable if +ve, Refund if -ve)
-- Net CGST: ${formatINR(data.netCGST)}
-- Net SGST: ${formatINR(data.netSGST)}
-- Net GST:  ${formatINR(data.netGST)}
-`
-    const blob = new Blob([text], { type: 'text/plain;charset=utf-8;' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `GST-Summary-${MONTHS[Number(month)]}-${year}.txt`
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
-    URL.revokeObjectURL(url)
-    toast({ title: 'CA Tax Summary TXT downloaded' })
   }
 
   return (
@@ -595,17 +697,12 @@ NET GST (Payable if +ve, Refund if -ve)
             Net GST payable or refundable based on Output − Input
           </p>
         </div>
-        <div className="flex flex-wrap gap-2">
-          <Button variant="outline" onClick={exportTxt}>
-            <FileText className="mr-1 h-4 w-4" /> Export TXT (PDF-ready)
-          </Button>
-          <Button onClick={exportCsv}>
-            <Download className="mr-1 h-4 w-4" /> Export Full CA Tax Summary CSV
-          </Button>
-        </div>
+        <Button onClick={exportCsv}>
+          <Download className="mr-1 h-4 w-4" /> Export CA Tax Summary CSV
+        </Button>
       </CardHeader>
       <CardContent className="space-y-4">
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
           <Field label="Month">
             <Select value={month} onValueChange={setMonth}>
               <SelectTrigger><SelectValue /></SelectTrigger>
@@ -626,6 +723,12 @@ NET GST (Payable if +ve, Refund if -ve)
                 })}
               </SelectContent>
             </Select>
+          </Field>
+          <Field label="Company">
+            <Input
+              value={company}
+              onChange={(e) => setCompany(e.target.value)}
+            />
           </Field>
         </div>
 
@@ -663,31 +766,18 @@ NET GST (Payable if +ve, Refund if -ve)
             </div>
           </div>
 
-          <div
-            className={`rounded-lg border p-4 ${
-              data.netGST >= 0
-                ? 'border-red-200 bg-red-50'
-                : 'border-emerald-200 bg-emerald-50'
-            }`}
-          >
+          <div className={`rounded-lg border p-4 ${data.netGST >= 0 ? 'border-red-200 bg-red-50' : 'border-emerald-200 bg-emerald-50'}`}>
             <div className="flex items-center gap-2">
               <Calculator className="h-4 w-4" />
               <div className="text-xs font-semibold uppercase">
                 Net GST {data.netGST >= 0 ? 'Payable' : 'Refundable'}
               </div>
             </div>
-            <div
-              className={`mt-2 text-2xl font-bold ${
-                data.netGST >= 0 ? 'text-red-900' : 'text-emerald-900'
-              }`}
-            >
+            <div className={`mt-2 text-2xl font-bold ${data.netGST >= 0 ? 'text-red-900' : 'text-emerald-900'}`}>
               {formatINR(Math.abs(data.netGST))}
             </div>
             <div className="mt-1 text-xs text-muted-foreground">
               Net CGST {formatINR(data.netCGST)} · Net SGST {formatINR(data.netSGST)}
-            </div>
-            <div className="mt-1 text-[10px] text-muted-foreground">
-              {data.netGST >= 0 ? 'Pay to government' : 'Claim as refund'}
             </div>
           </div>
         </div>
@@ -714,17 +804,13 @@ NET GST (Payable if +ve, Refund if -ve)
                 <TableCell className="text-xs">CGST</TableCell>
                 <TableCell className="text-right text-xs">{formatINR(data.outputCGST)}</TableCell>
                 <TableCell className="text-right text-xs">{formatINR(data.inputCGST)}</TableCell>
-                <TableCell className="text-right text-xs font-semibold">
-                  {formatINR(data.netCGST)}
-                </TableCell>
+                <TableCell className="text-right text-xs font-semibold">{formatINR(data.netCGST)}</TableCell>
               </TableRow>
               <TableRow>
                 <TableCell className="text-xs">SGST</TableCell>
                 <TableCell className="text-right text-xs">{formatINR(data.outputSGST)}</TableCell>
                 <TableCell className="text-right text-xs">{formatINR(data.inputSGST)}</TableCell>
-                <TableCell className="text-right text-xs font-semibold">
-                  {formatINR(data.netSGST)}
-                </TableCell>
+                <TableCell className="text-right text-xs font-semibold">{formatINR(data.netSGST)}</TableCell>
               </TableRow>
               <TableRow className="border-t-2 bg-muted/30 font-semibold">
                 <TableCell>TOTAL GST</TableCell>
@@ -741,24 +827,16 @@ NET GST (Payable if +ve, Refund if -ve)
 }
 
 // ----------------------------------------------------------------------------
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+function Field({ label, children, className }: { label: string; children: React.ReactNode; className?: string }) {
   return (
-    <div>
+    <div className={className}>
       <Label className="mb-1 block text-xs font-medium text-foreground">{label}</Label>
       {children}
     </div>
   )
 }
 
-function Mini({
-  label,
-  value,
-  variant = 'default',
-}: {
-  label: string
-  value: string
-  variant?: 'default' | 'success' | 'info'
-}) {
+function Mini({ label, value, variant = 'default' }: { label: string; value: string; variant?: 'default' | 'success' | 'info' }) {
   const styles = {
     default: 'border-border bg-card',
     success: 'border-emerald-200 bg-emerald-50',

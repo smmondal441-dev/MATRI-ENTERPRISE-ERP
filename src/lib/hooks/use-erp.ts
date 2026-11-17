@@ -42,6 +42,14 @@ export function useSaleItems(saleId: number | undefined) {
   )
 }
 
+// Fetch ALL sale items — used by GST Reports for company-wise filtering.
+export function useAllSaleItems() {
+  return useLiveQuery(async () => {
+    const { db } = await import('@/lib/db/dexie')
+    return db.sale_items.toArray()
+  }, [])
+}
+
 export function useCollections() {
   return useLiveQuery(() => CollectionService.all(), [])
 }
