@@ -89,6 +89,23 @@ let pendingTrigger = false  // true when a sync was requested but one is already
 let periodicTimer: ReturnType<typeof setInterval> | null = null
 
 // ----------------------------------------------------------------------------
+// FAILED RECORDS QUARANTINE — prevents the "sync freeze" loop
+// ----------------------------------------------------------------------------
+// When a record fails to push 2+ times, it's added to this Set. Future sync
+// cycles skip quarantined records so the sync completes instantly instead of
+// retrying the same bad record forever.
+//
+// The quarantine is cleared by triggerSyncNow() (manual "Sync Now" click),
+// giving the user a way to retry after fixing the underlying issue (e.g.
+// running db:push-turso to add missing columns).
+//
+// Key format: `${entityName}:${id}` (e.g. "products:123")
+// ----------------------------------------------------------------------------
+const failedRecords = new Set<string>()
+const failCounts = new Map<string, number>()
+const FAIL_THRESHOLD = 2 // after 2 failures, quarantine the record
+
+// ----------------------------------------------------------------------------
 // State management + subscription
 // ----------------------------------------------------------------------------
 
@@ -276,8 +293,10 @@ export async function syncAllPending(): Promise<{
       return { syncedCounts: emptyCounts(), errors: [] }
     }
 
-    // Build the batch payload
-    const batches: Record<EntityName, any[]> = {
+    // Build the batch payload — FILTER OUT quarantined records so they don't
+    // block the sync cycle. Quarantined records are ones that have failed 2+
+    // times and are skipped until the user manually retries via Sync Now.
+    const rawBatches: Record<EntityName, any[]> = {
       products: await getPending(db.products),
       customers: await getPending(db.customers),
       purchases: await getPending(db.purchases),
@@ -288,6 +307,33 @@ export async function syncAllPending(): Promise<{
       damages: await getPending(db.damages),
       purchase_returns: await getPending(db.purchase_returns),
       sales_returns: await getPending(db.sales_returns),
+    }
+
+    // Filter out quarantined records
+    const batches: Record<EntityName, any[]> = {} as Record<EntityName, any[]>
+    let quarantinedCount = 0
+    for (const k of Object.keys(rawBatches) as EntityName[]) {
+      const filtered = rawBatches[k].filter((rec: any) => {
+        const key = `${k}:${rec.id}`
+        if (failedRecords.has(key)) {
+          quarantinedCount++
+          return false
+        }
+        return true
+      })
+      batches[k] = filtered
+    }
+
+    if (quarantinedCount > 0) {
+      console.log(`[sync] Skipping ${quarantinedCount} quarantined record(s) (failed 2+ times). Click "Sync Now" to retry.`)
+    }
+
+    // If ALL pending records are quarantined, exit early — nothing to push.
+    const totalToPush = Object.values(batches).reduce((s, arr) => s + arr.length, 0)
+    if (totalToPush === 0) {
+      console.log('[sync] All pending records are quarantined — nothing to push.')
+      setState({ isSyncing: false, lastSyncAt: new Date().toISOString() })
+      return { syncedCounts: emptyCounts(), errors: [] }
     }
 
     // Strip isSynced/synced_at from the payload (server sets its own)
@@ -358,11 +404,37 @@ export async function syncAllPending(): Promise<{
     }
 
     // Mark each successfully-synced record as isSynced=true locally.
+    // Also CLEAR fail counts for records that succeeded this time.
     const syncedCounts = emptyCounts()
     for (const entityName of Object.keys(json.results) as EntityName[]) {
       const ids = json.results[entityName]?.ids ?? []
       await markSynced(entityName, ids)
       syncedCounts[entityName] = ids.length
+      // Clear fail counts for records that just succeeded
+      for (const id of ids) {
+        const key = `${entityName}:${id}`
+        failCounts.delete(key)
+        failedRecords.delete(key)
+      }
+    }
+
+    // ---- FAILED RECORDS QUARANTINE ----
+    // Track fail counts for records that failed. After FAIL_THRESHOLD (2)
+    // consecutive failures, add to the quarantine set so they're skipped
+    // on future cycles. This prevents the "sync freeze" loop where a bad
+    // record blocks every sync attempt forever.
+    for (const err of json.errors) {
+      if (err.id == null) continue
+      const key = `${err.entity}:${err.id}`
+      const count = (failCounts.get(key) ?? 0) + 1
+      failCounts.set(key, count)
+      if (count >= FAIL_THRESHOLD && !failedRecords.has(key)) {
+        failedRecords.add(key)
+        console.warn(
+          `[sync] QUARANTINED ${key} after ${count} failures: ${err.message?.slice(0, 100)}. ` +
+          `It will be skipped on future sync cycles. Click "Sync Now" to retry.`
+        )
+      }
     }
 
     const remainingCounts = await getPendingCounts()
@@ -441,6 +513,16 @@ export async function triggerSyncNow(): Promise<void> {
   // Even if we think we're offline, give it one attempt — the user might
   // have just plugged in ethernet and navigator.onLine hasn't updated yet.
   setState({ isOnline: typeof navigator !== 'undefined' ? navigator.onLine : true })
+
+  // ---- CLEAR QUARANTINE on manual sync ----
+  // When the user clicks "Sync Now", clear the failed-records quarantine
+  // so previously-failed records get retried. This lets the user fix the
+  // underlying issue (e.g. run db:push-turso) and then retry.
+  if (failedRecords.size > 0) {
+    console.log(`[sync] Clearing ${failedRecords.size} quarantined record(s) for manual retry.`)
+    failedRecords.clear()
+    failCounts.clear()
+  }
 
   // ---- 2-Way Sync cycle: PUSH first, then PULL ----
   // 1. Push: upload all local isSynced=false rows to Turso.

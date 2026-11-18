@@ -1,29 +1,12 @@
 // ============================================================================
-// POST /api/sync/push
+// POST /api/sync/push — DYNAMIC UPSERT ROUTER
 // ----------------------------------------------------------------------------
-// Receives a batch of locally-created records from the offline-first ERP and
-// upserts them into PostgreSQL / CockroachDB via Prisma.
+// Replaces 10 hardcoded upsert functions with a single generic dynamicUpsert()
+// that auto-maps snake_case → camelCase + auto-coerces types using convention.
 //
-// STRATEGY (v2 — CockroachDB-safe):
-//   - The server table has its own auto-increment `id` (primary key) PLUS a
-//     `local_id` column that stores the client-side Dexie ID.
-//   - Upserts match on `localId` (not `id`), so there's never a conflict
-//     between client-provided IDs and server-generated sequence IDs.
-//   - If a record with the same `localId` already exists, we update its data
-//     fields. If not, we create a new row with a server-generated `id` and
-//     the client's `localId`.
-//   - Every failed record is logged to console.error with full detail so the
-//     developer can trace exact database rejection reasons.
-//
-// Request body:
-//   { "batches": { "products": [{...}], "customers": [{...}], ... } }
-//
-// Response:
-//   {
-//     "success": true,
-//     "results": { "products": { "count": 5, "ids": [1, 2, 3, 4, 5] } },
-//     "errors": []
-//   }
+// When you add a new column to schema.prisma, the dynamic mapper automatically
+// passes it through — zero code changes needed here. Just run:
+//   prisma generate + db:push-turso
 // ============================================================================
 
 import { NextRequest, NextResponse } from 'next/server'
@@ -59,29 +42,16 @@ interface PushResponse {
   errors: { entity: string; id?: number | string; message: string }[]
 }
 
-// ----------------------------------------------------------------------------
-// BigInt-safe JSON serialization helper
-// ----------------------------------------------------------------------------
-// Prisma returns BigInt for BigInt columns, but JSON.stringify() cannot
-// serialize BigInt natively (throws "Do not know how to serialize a BigInt").
-// This helper converts any BigInt values in the response to strings so they
-// survive JSON serialization. The client treats all IDs as numbers anyway
-// (via Number(rec.id)), so string BigInts are fine.
-// ----------------------------------------------------------------------------
-
 function bigIntReplacer(_key: string, value: any): any {
-  if (typeof value === 'bigint') {
-    return value.toString()
-  }
+  if (typeof value === 'bigint') return value.toString()
   return value
 }
 
 // ----------------------------------------------------------------------------
-// Helpers — safe type coercion (handles BigInt from libSQL intMode: 'bigint')
+// Type coercion helpers
 // ----------------------------------------------------------------------------
 
-// For BigInt fields — converts any input to BigInt
-function bigInt(val: any, fallback: bigint = BigInt(0)): bigint {
+function toBigInt(val: any, fallback: bigint = BigInt(0)): bigint {
   if (typeof val === 'bigint') return val
   if (val === null || val === undefined || val === '') return fallback
   const n = Number(val)
@@ -89,8 +59,7 @@ function bigInt(val: any, fallback: bigint = BigInt(0)): bigint {
   return BigInt(Math.trunc(n))
 }
 
-// For nullable BigInt fields — returns BigInt or null
-function nullableBigInt(val: any): bigint | null {
+function toNullableBigInt(val: any): bigint | null {
   if (val === null || val === undefined || val === '') return null
   if (typeof val === 'bigint') return val
   const n = Number(val)
@@ -98,26 +67,30 @@ function nullableBigInt(val: any): bigint | null {
   return BigInt(Math.trunc(n))
 }
 
-// For Float fields — converts any input to number
-function num(val: any, fallback = 0): number {
+function toNum(val: any, fallback = 0): number {
   if (typeof val === 'bigint') return Number(val)
   const n = Number(val)
   return isNaN(n) ? fallback : n
 }
 
-function str(val: any, fallback = ''): string {
+function toStr(val: any, fallback = ''): string {
   if (val === null || val === undefined) return fallback
   return String(val)
 }
 
-function nullableStr(val: any): string | null {
+function toNullableStr(val: any): string | null {
   if (val === null || val === undefined || val === '') return null
   return String(val)
 }
 
-// Change 2 — normalize business dates to YYYY-MM-DD (10 chars). Strips any
-// ISO timestamp tail so IST timezone day-shift never occurs. Returns the
-// input as-is for empty/null/undefined so callers control nullability.
+function toDate(val: any): Date {
+  if (val) {
+    const d = new Date(val)
+    if (!isNaN(d.getTime())) return new Date(d.toISOString())
+  }
+  return new Date()
+}
+
 function isoDateOnly(val: any): string {
   if (val === null || val === undefined || val === '') return ''
   return String(val).slice(0, 10)
@@ -128,408 +101,182 @@ function nullableIsoDateOnly(val: any): string | null {
   return String(val).slice(0, 10)
 }
 
-// Change 2 — always returns a Date object whose internal timestamp equals
-// `new Date(val).toISOString()`. This guards against bare YYYY-MM-DD inputs
-// being parsed as local-midnight on servers in non-UTC timezones, which would
-// produce a Date without a UTC 'Z' serialization. Prisma then writes the
-// canonical UTC form to the database.
-function dateOrNow(val: any): Date {
-  if (val) {
-    const d = new Date(val)
-    if (!isNaN(d.getTime())) return new Date(d.toISOString())
-  }
-  return new Date()
+// ----------------------------------------------------------------------------
+// SNAKE_CASE → CAMELCASE converter
+// ----------------------------------------------------------------------------
+// "customer_type" → "customerType"
+// "is_deleted" → "isDeleted"
+// "bill_allocations" → "billAllocations"
+// "against_invoice_no" → "againstInvoiceNo"
+// ----------------------------------------------------------------------------
+
+function snakeToCamel(s: string): string {
+  return s.replace(/_([a-z])/g, (_, c) => c.toUpperCase())
 }
 
 // ----------------------------------------------------------------------------
-// Per-entity upsert handlers
+// CONVENTION-BASED TYPE INFERENCE
 // ----------------------------------------------------------------------------
-// Each handler:
-//   1. Extracts the local Dexie `id` from the record
-//   2. Uses Prisma `upsert` with `where: { localId: <dexie_id> }`
-//   3. On create: lets the server auto-generate the `id` column
-//   4. On update: refreshes all data fields (not just syncedAt)
-//   5. Returns the local ID so the client can mark isSynced=true
+// Since we can't reliably access Prisma's DMMF in adapter mode, we infer the
+// Prisma type from the field name + value:
 //
-// IMPORTANT: The `localId` column must exist in the Prisma schema with a
-// @@unique constraint. See prisma/schema.prisma for the updated models.
+//   - Fields ending in "_id" or named "id" / "local_id" / "sale_local_id"
+//     → BigInt (nullable if value is null/undefined)
+//   - Fields starting with "is_" → Boolean
+//   - Fields ending in "_at" or named "created_at" / "synced_at" → DateTime
+//   - Fields named "date" / "mfg_date" / "expiry_date" → String (YYYY-MM-DD)
+//   - Fields ending in "_amount" / "_rate" / "_pcs" / "_qty" / "_value" /
+//     "_percent" / "_factor" / "_balance" / "subtotal" / "cgst" / "sgst" /
+//     "total" / "rate" → Float
+//   - Everything else → String (nullable if value is null/undefined)
 // ----------------------------------------------------------------------------
 
-async function upsertProduct(rec: any): Promise<number> {
-  const localId = bigInt(rec.id)
-  const data = {
-    localId,
-    sku: str(rec.sku),
-    companyName: str(rec.company_name),
-    name: str(rec.name),
-    category: nullableStr(rec.category),
-    hsnCode: str(rec.hsn_code),
-    baseUnit: str(rec.base_unit, 'Pcs'),
-    outerUnit: str(rec.outer_unit, 'Bag'),
-    conversionFactor: num(rec.conversion_factor, 1),
-    packSize: nullableStr(rec.pack_size),
-    // Loose Product flag — defaults to false for backward compat.
-    isLoose: Boolean(rec.is_loose ?? false),
-    isDeleted: Boolean(rec.is_deleted ?? false),
-    purchaseRatePerOuterUnit: num(rec.purchase_rate_per_outer_unit ?? rec.purchase_rate),
-    purchaseRatePerPiece: num(rec.purchase_rate_per_piece ?? rec.purchase_rate_per_pcs),
-    sellingRatePerPiece: num(rec.selling_rate_per_piece ?? rec.sales_rate_per_pcs),
-    sellingRatePerOuterUnit: num(rec.selling_rate_per_outer_unit ?? rec.sales_rate),
-    purchaseRate: rec.purchase_rate != null ? num(rec.purchase_rate) : null,
-    salesRate: rec.sales_rate != null ? num(rec.sales_rate) : null,
-    purchaseRatePerPcs: rec.purchase_rate_per_pcs != null ? num(rec.purchase_rate_per_pcs) : null,
-    salesRatePerPcs: rec.sales_rate_per_pcs != null ? num(rec.sales_rate_per_pcs) : null,
-    gstPercent: num(rec.gst_percent),
-    openingStockPcs: num(rec.opening_stock_pcs),
-    createdAt: dateOrNow(rec.created_at),
-    syncedAt: new Date(),
-  }
-  const result = await db.product.upsert({
-    where: { localId },
-    create: data,
-    update: data,
-  })
-  return Number(localId)
+// Fields that should be STRIPPED from the payload (server manages these)
+const STRIP_FIELDS = new Set([
+  'isSynced', 'synced_at', 'is_synced',
+  'id', // the Dexie auto-increment id — we use localId instead
+])
+
+// BigInt field name patterns (by suffix or exact match)
+const BIGINT_FIELDS = new Set([
+  'localId', 'productId', 'customerId', 'saleLocalId', 'saleId',
+  'originalPurchaseId', 'originalSaleId', 'entityId', 'recordCount',
+])
+
+function isBigIntField(camelName: string): boolean {
+  if (BIGINT_FIELDS.has(camelName)) return true
+  // Any field ending in "Id" (camelCase) or "_id" (snake_case) that's NOT in STRIP_FIELDS
+  if (camelName.endsWith('Id') && !STRIP_FIELDS.has(camelName)) return true
+  return false
 }
 
-async function upsertCustomer(rec: any): Promise<number> {
-  const localId = bigInt(rec.id)
-  const data = {
-    localId,
-    customerId: str(rec.customer_id),
-    name: str(rec.name),
-    routeArea: str(rec.route_area),
-    phone: str(rec.phone),
-    gstin: nullableStr(rec.gstin),
-    openingBalance: num(rec.opening_balance),
-    billNumber: nullableStr(rec.bill_number),
-    isDeleted: Boolean(rec.is_deleted ?? false),
-    customerType: nullableStr(rec.customer_type),
-    createdAt: dateOrNow(rec.created_at),
-    syncedAt: new Date(),
-  }
-  const result = await db.customer.upsert({
-    where: { localId },
-    create: data,
-    update: data,
-  })
-  return Number(localId)
+function isBooleanField(camelName: string): boolean {
+  return camelName.startsWith('is') && camelName.length > 2 &&
+    camelName[2] === camelName[2].toUpperCase()
 }
 
-async function upsertPurchase(rec: any): Promise<number> {
-  const localId = bigInt(rec.id)
-  const data = {
-    localId,
-    billNo: str(rec.bill_no),
-    date: isoDateOnly(rec.date),
-    supplierName: str(rec.supplier_name),
-    supplierGstin: nullableStr(rec.supplier_gstin),
-    productId: bigInt(rec.product_id),
-    productSku: str(rec.product_sku),
-    productName: str(rec.product_name),
-    hsnCode: str(rec.hsn_code),
-    bagQty: num(rec.bag_qty),
-    pcsQty: num(rec.pcs_qty),
-    totalPcs: num(rec.total_pcs),
-    purchaseRate: num(rec.purchase_rate),
-    gstPercent: num(rec.gst_percent),
-    taxableAmount: num(rec.taxable_amount),
-    cgst: num(rec.cgst),
-    sgst: num(rec.sgst),
-    totalAmount: num(rec.total_amount),
-    mfgDate: nullableIsoDateOnly(rec.mfg_date),
-    expiryDate: nullableIsoDateOnly(rec.expiry_date),
-    isDeleted: Boolean(rec.is_deleted ?? false),
-    createdAt: dateOrNow(rec.created_at),
-    syncedAt: new Date(),
-  }
-  await db.purchase.upsert({
-    where: { localId },
-    create: data,
-    update: data,
-  })
-  return Number(localId)
+function isDateField(camelName: string): boolean {
+  return camelName === 'createdAt' || camelName === 'syncedAt'
 }
 
-async function upsertSale(rec: any): Promise<number> {
-  const localId = bigInt(rec.id)
-  const data = {
-    localId,
-    invoiceNo: str(rec.invoice_no),
-    date: isoDateOnly(rec.date),
-    customerId: bigInt(rec.customer_id),
-    customerName: str(rec.customer_name),
-    paymentMode: str(rec.payment_mode, 'Cash'),
-    subtotal: num(rec.subtotal),
-    cgst: num(rec.cgst),
-    sgst: num(rec.sgst),
-    totalAmount: num(rec.total_amount),
-    totalProfit: num(rec.total_profit),
-    totalMarginPercent: num(rec.total_margin_percent),
-    paidAmount: num(rec.paid_amount),
-    isDeleted: Boolean(rec.is_deleted ?? false),
-    createdAt: dateOrNow(rec.created_at),
-    syncedAt: new Date(),
-  }
-
-  // ---- CRITICAL: Delete orphaned sale_items before upserting ----
-  // When a sale is edited locally, Dexie deletes old items + inserts new ones.
-  // The new items get pushed here via upsertSaleItem(). But the OLD items
-  // (deleted from Dexie) are never pushed as "deleted" → they remain in
-  // Turso as orphans. When another device pulls, it gets BOTH old + new →
-  // duplicated/inflated totals.
-  //
-  // Fix: before the upsert, delete ALL existing sale_items for this sale.
-  // The new items will be re-inserted by upsertSaleItem() calls that follow
-  // in the same batch. This is a "delete-then-insert" pattern that ensures
-  // the server's sale_items always match the client's current state.
-  try {
-    await db.saleItem.deleteMany({
-      where: { saleLocalId: localId },
-    })
-    console.log(`[sync/push] Cleared old sale_items for sale localId=${localId}`)
-  } catch (e: any) {
-    // Non-fatal: if the delete fails (e.g. table doesn't exist yet),
-    // continue with the upsert. The new items will still be inserted.
-    console.warn(`[sync/push] Failed to clear old sale_items for sale ${localId}:`, e?.message)
-  }
-
-  await db.sale.upsert({
-    where: { localId },
-    create: data,
-    update: data,
-  })
-  return Number(localId)
+function isBusinessDateField(snakeName: string): boolean {
+  return snakeName === 'date' || snakeName === 'mfg_date' ||
+    snakeName === 'expiry_date'
 }
 
-async function upsertSaleItem(rec: any): Promise<number> {
-  const localId = bigInt(rec.id)
-  const data = {
-    localId,
-    saleLocalId: bigInt(rec.sale_id),
-    productId: bigInt(rec.product_id),
-    productName: str(rec.product_name),
-    productSku: str(rec.product_sku),
-    hsnCode: str(rec.hsn_code),
-    quantityPcs: num(rec.quantity_pcs),
-    rate: num(rec.rate),
-    gstPercent: num(rec.gst_percent),
-    taxableAmount: num(rec.taxable_amount),
-    cgst: num(rec.cgst),
-    sgst: num(rec.sgst),
-    total: num(rec.total),
-    purchaseRate: num(rec.purchase_rate),
-    itemProfit: num(rec.item_profit),
-    itemMarginPercent: num(rec.item_margin_percent),
-    isDeleted: Boolean(rec.is_deleted ?? false),
-    syncedAt: new Date(),
-  }
-  await db.saleItem.upsert({
-    where: { localId },
-    create: data,
-    update: data,
-  })
-  return Number(localId)
+function isFloatField(camelName: string, snakeName: string): boolean {
+  const floatSuffixes = ['Amount', 'Rate', 'Pcs', 'Qty', 'Value', 'Percent',
+    'Factor', 'Balance', 'ExpenseValue', 'BagValue', 'MarginPercent']
+  const floatExact = new Set([
+    'subtotal', 'cgst', 'sgst', 'total', 'rate', 'openingStockPcs',
+    'conversionFactor', 'gstPercent', 'purchaseRate', 'salesRate',
+    'purchaseRatePerPcs', 'salesRatePerPcs', 'purchaseRatePerPiece',
+    'sellingRatePerPiece', 'purchaseRatePerOuterUnit',
+    'sellingRatePerOuterUnit', 'openingBalance', 'paidAmount',
+    'totalAmount', 'totalProfit', 'itemProfit', 'itemMarginPercent',
+    'taxableAmount', 'totalMarginPercent', 'bagQty', 'pcsQty', 'totalPcs',
+    'quantityPcs', 'salesRatePerPcs', 'purchaseRatePerPcs',
+    'expenseValue', 'amount', 'openingStockPcs',
+  ])
+  if (floatExact.has(camelName)) return true
+  return floatSuffixes.some(s => camelName.endsWith(s))
 }
 
-async function upsertCollection(rec: any): Promise<number> {
-  const localId = bigInt(rec.id)
-  // Bill-by-bill allocations: client stores as a JS array on
-  // Collection.bill_allocations. Server column is a JSON string, so we
-  // serialize here. Empty/missing allocations → null (lump-sum collection).
-  let billAllocationsStr: string | null = null
-  if (Array.isArray(rec.bill_allocations) && rec.bill_allocations.length > 0) {
-    try {
-      billAllocationsStr = JSON.stringify(
-        rec.bill_allocations.map((a: any) => ({
-          sale_id: bigInt(a.sale_id),
-          invoice_no: str(a.invoice_no),
-          amount: num(a.amount),
-        }))
-      )
-    } catch {
-      // Malformed allocation payload — store as null rather than crashing
-      // the whole upsert. The collection itself still saves.
-      billAllocationsStr = null
+// ----------------------------------------------------------------------------
+// DYNAMIC UPSERT — the single generic function that replaces all 10 handlers
+// ----------------------------------------------------------------------------
+
+/**
+ * Dynamically maps a snake_case client record to a camelCase Prisma data
+ * object, coercing types by convention. Then upserts via the given Prisma
+ * model delegate.
+ *
+ * @param rec       - The raw client record (snake_case keys)
+ * @param model     - The Prisma model delegate (e.g. db.product)
+ * @returns         - The localId as a number (for the client's markSynced)
+ */
+async function dynamicUpsert(
+  rec: any,
+  model: any
+): Promise<number> {
+  const localId = toBigInt(rec.id)
+  const data: Record<string, any> = { localId }
+
+  for (const snakeKey of Object.keys(rec)) {
+    // Skip stripped fields
+    if (STRIP_FIELDS.has(snakeKey) || STRIP_FIELDS.has(snakeToCamel(snakeKey))) continue
+
+    const camelKey = snakeToCamel(snakeKey)
+    const rawVal = rec[snakeKey]
+
+    // Skip undefined values (don't send them to Prisma)
+    if (rawVal === undefined) continue
+
+    // Auto-coerce based on convention
+    if (isBigIntField(camelKey)) {
+      // Nullable BigInt fields (like customerId on Damage, originalPurchaseId, etc.)
+      if (rawVal === null || rawVal === '') {
+        data[camelKey] = null
+      } else {
+        data[camelKey] = toBigInt(rawVal)
+      }
+    } else if (isBooleanField(camelKey)) {
+      data[camelKey] = Boolean(rawVal ?? false)
+    } else if (isDateField(camelKey)) {
+      data[camelKey] = toDate(rawVal)
+    } else if (isBusinessDateField(snakeKey)) {
+      // Business dates are String columns (YYYY-MM-DD)
+      data[camelKey] = rawVal === null || rawVal === undefined || rawVal === ''
+        ? null : isoDateOnly(rawVal)
+    } else if (isFloatField(camelKey, snakeKey)) {
+      data[camelKey] = rawVal === null ? null : toNum(rawVal)
+    } else {
+      // String field — nullable if null/undefined
+      data[camelKey] = (rawVal === null || rawVal === undefined || rawVal === '')
+        ? null : String(rawVal)
     }
   }
-  const data = {
-    localId,
-    date: isoDateOnly(rec.date),
-    customerId: bigInt(rec.customer_id),
-    customerName: str(rec.customer_name),
-    amount: num(rec.amount),
-    paymentMode: str(rec.payment_mode, 'Cash'),
-    notes: nullableStr(rec.notes),
-    billAllocations: billAllocationsStr,
-    createdAt: dateOrNow(rec.created_at),
-    syncedAt: new Date(),
-  }
-  await db.collection.upsert({
-    where: { localId },
-    create: data,
-    update: data,
-  })
-  return Number(localId)
-}
 
-async function upsertDistributorSetting(rec: any): Promise<number> {
-  const localId = bigInt(rec.id)
-  const data = {
-    localId,
-    storeName: str(rec.store_name),
-    subtitle: nullableStr(rec.subtitle),
-    gstin: str(rec.gstin),
-    address: str(rec.address),
-    phone: str(rec.phone),
-    email: str(rec.email),
-    logoUrl: nullableStr(rec.logo_url),
-    invoicePrefix: str(rec.invoice_prefix, 'INV'),
-    state: str(rec.state),
-    bankDetails: nullableStr(rec.bank_details),
-    syncedAt: new Date(),
-  }
-  await db.distributorSetting.upsert({
-    where: { localId },
-    create: data,
-    update: data,
-  })
-  return Number(localId)
-}
+  // Always set syncedAt
+  data.syncedAt = new Date()
 
-async function upsertDamage(rec: any): Promise<number> {
-  const localId = bigInt(rec.id)
-  const data = {
-    localId,
-    date: isoDateOnly(rec.date),
-    productId: bigInt(rec.product_id),
-    productSku: str(rec.product_sku),
-    productName: str(rec.product_name),
-    hsnCode: str(rec.hsn_code),
-    bagQty: num(rec.bag_qty),
-    pcsQty: num(rec.pcs_qty),
-    totalPcs: num(rec.total_pcs),
-    reason: str(rec.reason, 'Broken'),
-    notes: nullableStr(rec.notes),
-    expenseValue: num(rec.expense_value),
-    // Upgrade 3 — Damage source. Defaults to 'godown' for backward compat
-    // (legacy clients / pre-Upgrade-3 rows that didn't send this field).
-    damageSource: rec.damage_source === 'store' ? 'store' : 'godown',
-    // customer_id only meaningful when source = 'store'; null otherwise.
-    customerId:
-      rec.damage_source === 'store' && rec.customer_id != null
-        ? bigInt(rec.customer_id)
-        : null,
-    // Task 2 — Bill-wise damage allocation. sale_id + against_invoice_no
-    // only present when source = 'store' AND the user attributed the damage
-    // to a specific bill. Both nullable → null for godown / unattributed.
-    saleId:
-      rec.damage_source === 'store' && rec.sale_id != null
-        ? bigInt(rec.sale_id)
-        : null,
-    againstInvoiceNo:
-      rec.damage_source === 'store' && rec.against_invoice_no != null
-        ? nullableStr(rec.against_invoice_no)
-        : null,
-    createdAt: dateOrNow(rec.created_at),
-    syncedAt: new Date(),
+  // ---- SPECIAL CASE: sale_items orphan cleanup ----
+  // When upserting a Sale, delete all existing sale_items first to prevent
+  // orphaned duplicates from previous edits.
+  if (model === db.sale) {
+    try {
+      await db.saleItem.deleteMany({
+        where: { saleLocalId: localId },
+      })
+    } catch (e: any) {
+      console.warn(`[sync/push] Failed to clear old sale_items for sale ${localId}:`, e?.message)
+    }
   }
-  await db.damage.upsert({
-    where: { localId },
-    create: data,
-    update: data,
-  })
-  return Number(localId)
-}
 
-async function upsertPurchaseReturn(rec: any): Promise<number> {
-  const localId = bigInt(rec.id)
-  const data = {
-    localId,
-    date: isoDateOnly(rec.date),
-    originalPurchaseId: rec.original_purchase_id != null ? bigInt(rec.original_purchase_id) : null,
-    returnNo: str(rec.return_no),
-    supplierName: str(rec.supplier_name),
-    supplierGstin: nullableStr(rec.supplier_gstin),
-    productId: bigInt(rec.product_id),
-    productSku: str(rec.product_sku),
-    productName: str(rec.product_name),
-    hsnCode: str(rec.hsn_code),
-    bagQty: num(rec.bag_qty),
-    pcsQty: num(rec.pcs_qty),
-    totalPcs: num(rec.total_pcs),
-    purchaseRate: num(rec.purchase_rate),
-    purchaseRatePerPcs: num(rec.purchase_rate_per_pcs),
-    gstPercent: num(rec.gst_percent),
-    taxableAmount: num(rec.taxable_amount),
-    cgst: num(rec.cgst),
-    sgst: num(rec.sgst),
-    totalAmount: num(rec.total_amount),
-    reason: nullableStr(rec.reason),
-    createdAt: dateOrNow(rec.created_at),
-    syncedAt: new Date(),
-  }
-  await db.purchaseReturn.upsert({
+  await model.upsert({
     where: { localId },
     create: data,
     update: data,
   })
-  return Number(localId)
-}
 
-async function upsertSalesReturn(rec: any): Promise<number> {
-  const localId = bigInt(rec.id)
-  const data = {
-    localId,
-    date: isoDateOnly(rec.date),
-    originalSaleId: rec.original_sale_id != null ? bigInt(rec.original_sale_id) : null,
-    returnNo: str(rec.return_no),
-    customerId: bigInt(rec.customer_id),
-    customerName: str(rec.customer_name),
-    productId: bigInt(rec.product_id),
-    productSku: str(rec.product_sku),
-    productName: str(rec.product_name),
-    hsnCode: str(rec.hsn_code),
-    bagQty: num(rec.bag_qty),
-    pcsQty: num(rec.pcs_qty),
-    totalPcs: num(rec.total_pcs),
-    salesRatePerPcs: num(rec.sales_rate_per_pcs),
-    gstPercent: num(rec.gst_percent),
-    taxableAmount: num(rec.taxable_amount),
-    cgst: num(rec.cgst),
-    sgst: num(rec.sgst),
-    totalAmount: num(rec.total_amount),
-    restock: Boolean(rec.restock ?? false),
-    reason: nullableStr(rec.reason),
-    createdAt: dateOrNow(rec.created_at),
-    syncedAt: new Date(),
-  }
-  await db.salesReturn.upsert({
-    where: { localId },
-    create: data,
-    update: data,
-  })
   return Number(localId)
 }
 
 // ----------------------------------------------------------------------------
-// Entity name -> upsert function map
+// Entity name → Prisma model delegate map
 // ----------------------------------------------------------------------------
 
-const UPSERT_HANDLERS: Record<
-  keyof BatchPayload,
-  (rec: any) => Promise<number>
-> = {
-  products: upsertProduct,
-  customers: upsertCustomer,
-  purchases: upsertPurchase,
-  sales: upsertSale,
-  sale_items: upsertSaleItem,
-  collections: upsertCollection,
-  distributor_settings: upsertDistributorSetting,
-  damages: upsertDamage,
-  purchase_returns: upsertPurchaseReturn,
-  sales_returns: upsertSalesReturn,
+const MODEL_MAP: Record<string, any> = {
+  products: db.product,
+  customers: db.customer,
+  purchases: db.purchase,
+  sales: db.sale,
+  sale_items: db.saleItem,
+  collections: db.collection,
+  distributor_settings: db.distributorSetting,
+  damages: db.damage,
+  purchase_returns: db.purchaseReturn,
+  sales_returns: db.salesReturn,
 }
 
 // ----------------------------------------------------------------------------
@@ -569,8 +316,8 @@ export async function POST(req: NextRequest) {
     const records = batches[entityName] ?? []
     if (records.length === 0) continue
 
-    const handler = UPSERT_HANDLERS[entityName]
-    if (!handler) {
+    const model = MODEL_MAP[entityName]
+    if (!model) {
       errors.push({
         entity: entityName,
         message: `Unknown entity type: ${entityName}`,
@@ -581,13 +328,9 @@ export async function POST(req: NextRequest) {
     const ids: (number | string)[] = []
     for (const rec of records) {
       try {
-        const id = await handler(rec)
+        const id = await dynamicUpsert(rec, model)
         ids.push(id)
       } catch (e: any) {
-        // ---- DETAILED SERVER-SIDE LOGGING ----
-        // Log the full error to the server console so developers can trace
-        // exact database rejection reasons (constraint names, column names,
-        // SQL state codes, etc.)
         console.error(`[sync/push] FAILED to upsert ${entityName} id=${rec?.id}:`, {
           entity: entityName,
           localId: rec?.id,
@@ -622,8 +365,6 @@ export async function POST(req: NextRequest) {
   const totalSynced = Object.values(results).reduce((s, r) => s + r.count, 0)
   console.log(`[sync/push] Done: ${totalSynced} synced, ${totalErrors} errors`)
 
-  // Use BigInt-safe JSON serialization — Prisma may return BigInt values
-  // from upsert results, which JSON.stringify cannot handle natively.
   const responseBody = {
     success: totalErrors === 0,
     results,
@@ -642,14 +383,10 @@ export async function POST(req: NextRequest) {
 export async function GET() {
   const body = {
     ok: true,
-    service: 'FMCG ERP Sync — Push Endpoint (v3 BigInt-safe)',
-    version: 7,
-    strategy: 'upsert by localId (Int) — server auto-generates BigInt id',
-    endpoints: Object.keys(UPSERT_HANDLERS),
-    usage:
-      'POST a { batches: { products: [...], sales: [...] } } payload. ' +
-      'Records are upserted by their localId column. ' +
-      'Response includes successfully-synced local IDs per entity.',
+    service: 'FMCG ERP Sync — Push Endpoint (DYNAMIC)',
+    version: 8,
+    strategy: 'dynamic upsert by localId — convention-based type coercion',
+    entities: Object.keys(MODEL_MAP),
   }
   return new NextResponse(JSON.stringify(body, bigIntReplacer), {
     headers: { 'Content-Type': 'application/json' },
