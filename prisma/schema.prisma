@@ -242,6 +242,10 @@ model Damage {
   // godown damages. Nullable + optional so old rows and old clients remain
   // compatible without a data migration.
   customerId      BigInt?  @map("customer_id")
+  // Denormalized customer_name for fast display in the Damages log without
+  // needing to join/lookup the customer by id. Nullable + optional so old
+  // rows and old clients remain compatible without a data migration.
+  customerName    String?  @map("customer_name")
   // Task 2 — Bill-wise damage allocation. When a store-return damage is
   // attributed to a specific sale/invoice, the damage amount is deducted
   // from that bill's "Net Payable" in the Collection screen (Tally-style

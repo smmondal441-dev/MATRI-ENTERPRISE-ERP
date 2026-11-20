@@ -613,6 +613,10 @@ export async function GET() {
     // literal default 'godown' (TS would otherwise flag it as impossible).
     const damageSource: string = pick<string>(d, 'damageSource', 'damage_source', 'godown')
     const customerId = pick(d, 'customerId', 'customer_id', null)
+    // Denormalized customer_name snapshot — nullable, only present for
+    // store-damages attributed to a specific customer. Old server rows
+    // without the column default to null → undefined for Dexie.
+    const customerName = pick(d, 'customerName', 'customer_name', null)
     // Task 2 — Bill-wise damage allocation fields. Both nullable.
     const saleId = pick(d, 'saleId', 'sale_id', null)
     const againstInvoiceNo = pick(d, 'againstInvoiceNo', 'against_invoice_no', null)
@@ -634,6 +638,8 @@ export async function GET() {
       damage_source: damageSource === 'store' ? 'store' : 'godown',
       // customer_id only present for store damages; null → undefined for Dexie.
       customer_id: customerId != null ? toNum(customerId) : undefined,
+      // customer_name only present for store damages; null → undefined for Dexie.
+      customer_name: customerName != null ? safeStr(customerName) : undefined,
       // Task 2 — sale_id + against_invoice_no only present for bill-linked
       // store damages; null → undefined for Dexie.
       sale_id: saleId != null ? toNum(saleId) : undefined,

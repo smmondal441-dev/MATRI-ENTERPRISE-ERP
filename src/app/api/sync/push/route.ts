@@ -196,7 +196,9 @@ const ENTITY_NULLABLE_STRINGS: Record<string, Set<string>> = {
   collections:         new Set(['notes', 'billAllocations']),
   distributor_settings: new Set(['subtitle', 'logoUrl', 'bankDetails']),
   // NOTE: Damage.reason is NON-NULL String in the schema — do NOT list it here.
-  damages:             new Set(['notes', 'againstInvoiceNo']),
+  // customerName is nullable (optional String? on Damage model) — listed so
+  // null passes through unchanged instead of being coerced to "".
+  damages:             new Set(['notes', 'againstInvoiceNo', 'customerName']),
   purchase_returns:    new Set(['supplierGstin', 'reason']),
   sales_returns:       new Set(['reason']),
 }

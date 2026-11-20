@@ -243,6 +243,9 @@ const EXPECTED_SCHEMA = {
     { name: 'damage_source', sqlType: 'TEXT', nullable: false, default: "'godown'" },
     // ★ NEW COLUMN — Optional customer reference for store-damages
     { name: 'customer_id', sqlType: 'INTEGER', nullable: true },
+    // ★ NEW COLUMN — Denormalized customer_name snapshot for fast display
+    //    in the Damages log. Nullable so existing rows get NULL on migration.
+    { name: 'customer_name', sqlType: 'TEXT', nullable: true },
     // ★ Task 2 NEW COLUMN — Bill-wise damage allocation (sale_id + against_invoice_no)
     { name: 'sale_id', sqlType: 'INTEGER', nullable: true },
     { name: 'against_invoice_no', sqlType: 'TEXT', nullable: true },

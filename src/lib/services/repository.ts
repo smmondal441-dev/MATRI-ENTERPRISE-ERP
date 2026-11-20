@@ -1431,6 +1431,19 @@ export const BillDuesService = {
    * Returns the per-bill outstanding breakdown for a single customer.
    * Only credit sales are included. Fully-paid bills are excluded unless
    * `includePaid` is true.
+   *
+   * Task 2 — Bill-wise damage deduction (HARDENED):
+   *   For each credit sale, we look for Damage rows that match EITHER:
+   *     (a) damage.sale_id === sale.id                 ← primary key
+   *     (b) damage.against_invoice_no === sale.invoice_no  ← fallback
+   *   Only store-damages (damage_source === 'store') are considered.
+   *   Godown damages never adjust bill dues.
+   *
+   *   Net Payable = max(0, sale.total_amount - paid_amount - linked_damage_total)
+   *
+   *   This is reactive: any new/edited/deleted damage re-runs the live query
+   *   because Dexie observes every table read inside useLiveQuery's callback
+   *   (sales, collections AND damages are all read here).
    */
   async byCustomer(
     customerId: number,
@@ -1440,7 +1453,8 @@ export const BillDuesService = {
     const sales = await db.sales.toArray()
     const collections = await db.collections.toArray()
     // Task 2 — also load damages so we can subtract store-return damage
-    // amounts attributed to each bill via sale_id.
+    // amounts attributed to each bill via sale_id (or against_invoice_no
+    // as a fallback when sale_id is null but the invoice_no is set).
     const damages = await db.damages.toArray()
 
     // ---- Credit sales for this customer (exclude soft-deleted) ----
@@ -1459,16 +1473,35 @@ export const BillDuesService = {
       (c) => String(c.customer_id) === cid && !(c as any).is_deleted
     )
 
-    // ---- All damages for this customer (we'll sum expense_value by sale_id) ----
-    // Only store-damages attributed to a specific sale are subtracted from
-    // that bill's net payable. Godown damages (no sale_id) are not bill-linked.
+    // ---- All store-damages attributed to a bill ----
+    // A damage is bill-linked when:
+    //   - damage_source === 'store'           (godown damages never bill-link)
+    //   - sale_id is set                     (primary — matches by id)
+    //   - OR against_invoice_no is set       (fallback — matches by invoice_no)
+    // Customer filter: prefer customer_id when set, but also accept damages
+    // that reference the customer's bills via sale_id → sale.customer_id
+    // even if damage.customer_id was not snapshotted.
     // Damage doesn't yet have is_deleted — filtered defensively with a cast.
-    const custDamages = damages.filter(
-      (d) =>
-        String(d.customer_id) === cid &&
-        d.sale_id != null &&
-        !(d as any).is_deleted
-    )
+    const saleIdToCustomerId = new Map<string, string>()
+    for (const s of sales) {
+      saleIdToCustomerId.set(String(s.id), String(s.customer_id))
+    }
+
+    const billLinkedDamages = damages.filter((d) => {
+      // Only store-damages adjust bill dues
+      if (d.damage_source !== 'store') return false
+      if ((d as any).is_deleted) return false
+      // Must have at least one bill reference
+      if (d.sale_id == null && !d.against_invoice_no) return false
+      // Customer scoping: include if damage.customer_id matches, OR if the
+      // damage's sale_id resolves to this customer via the sales table.
+      if (d.customer_id != null && String(d.customer_id) === cid) return true
+      if (d.sale_id != null) {
+        const ownerCid = saleIdToCustomerId.get(String(d.sale_id))
+        if (ownerCid === cid) return true
+      }
+      return false
+    })
 
     // ---- Build sale-id → paid-amount map by walking allocations ----
     // Multiple collections may allocate to the same sale; we sum them all.
@@ -1481,19 +1514,34 @@ export const BillDuesService = {
       }
     }
 
-    // ---- Build sale-id → damage-amount map by walking damages ----
+    // ---- Build sale-id + invoice_no → damage-amount map ----
     // Multiple damages may be attributed to the same sale; we sum them all.
-    const damageMap = new Map<string, number>()
-    for (const dmg of custDamages) {
-      const sid = String(dmg.sale_id)
-      damageMap.set(sid, (damageMap.get(sid) ?? 0) + (dmg.expense_value ?? 0))
+    // We key by BOTH sale.id (primary) and sale.invoice_no (fallback) so a
+    // damage with only against_invoice_no set still matches the right bill.
+    const damageBySaleId = new Map<string, number>()
+    const damageByInvoiceNo = new Map<string, number>()
+    for (const dmg of billLinkedDamages) {
+      const amt = dmg.expense_value ?? 0
+      if (dmg.sale_id != null) {
+        const sid = String(dmg.sale_id)
+        damageBySaleId.set(sid, (damageBySaleId.get(sid) ?? 0) + amt)
+      }
+      if (dmg.against_invoice_no) {
+        const inv = String(dmg.against_invoice_no)
+        damageByInvoiceNo.set(inv, (damageByInvoiceNo.get(inv) ?? 0) + amt)
+      }
     }
 
     // ---- Build the BillDue rows ----
     const rows: BillDue[] = creditSales.map((sale) => {
       const sid = String(sale.id)
       const paid = paidMap.get(sid) ?? 0
-      const damage = damageMap.get(sid) ?? 0
+      // Damage lookup: prefer sale_id match; fall back to invoice_no match.
+      // If both match (same sale via both keys), take the max so we don't
+      // double-count a damage that was keyed under both.
+      const dmgById = damageBySaleId.get(sid) ?? 0
+      const dmgByInv = damageByInvoiceNo.get(sale.invoice_no) ?? 0
+      const damage = Math.max(dmgById, dmgByInv)
       const remaining = sale.total_amount - paid
       // Net Payable = total - paid - damage (Tally-style "Against Reference"
       // adjustment). Floor at 0 so a bill can't go negative.

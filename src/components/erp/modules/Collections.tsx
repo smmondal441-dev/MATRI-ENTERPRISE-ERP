@@ -58,6 +58,10 @@ export function Collections() {
   const customers = useCustomers()
   const { toast } = useToast()
   const [search, setSearch] = useState('')
+  // Separate search input for the "All Collections" table — filters by
+  // Customer Name, Payment Mode, Against Bills (invoice no), or Notes.
+  // Independent from the customer-wise dues search above.
+  const [collectionsSearch, setCollectionsSearch] = useState('')
   const [openCustId, setOpenCustId] = useState<number | null>(null)
 
   // New collection form
@@ -235,6 +239,53 @@ export function Collections() {
     (collections ?? []).filter(
       (c) => String(c.customer_id) === String(customerId)
     )
+
+  // ---- All Collections: search filter + strict date-desc sorting ----
+  // Filter: matches Customer Name, Payment Mode, Against Bills (invoice_no),
+  //         or Notes (case-insensitive substring match).
+  // Sort:   STRICT by `date` field descending (newest first).
+  //         Backdated entries (e.g. a 5 Nov entry created on 19 Nov) must
+  //         appear in the 5 Nov position, NOT at the top. The `id` (Dexie
+  //         auto-increment, which is monotonic with creation order) is used
+  //         ONLY as a tie-breaker when two entries share the exact same date.
+  const sortedFilteredCollections = useMemo(() => {
+    const q = collectionsSearch.trim().toLowerCase()
+    let list = collections ?? []
+    if (q) {
+      list = list.filter((c) => {
+        const name = (c.customer_name ?? '').toLowerCase()
+        const mode = (c.payment_mode ?? '').toLowerCase()
+        const notes = (c.notes ?? '').toLowerCase()
+        // Against Bills — search across every allocation's invoice_no
+        const bills = (c.bill_allocations ?? [])
+          .map((a) => (a.invoice_no ?? '').toLowerCase())
+          .join(' ')
+        return (
+          name.includes(q) ||
+          mode.includes(q) ||
+          notes.includes(q) ||
+          bills.includes(q)
+        )
+      })
+    }
+    // Defensive date normalization: pad YYYY-M-D → YYYY-MM-DD so string
+    // comparison matches chronological order. Falls back to '' on invalid input.
+    const norm = (d: string | undefined): string => {
+      if (!d) return ''
+      const s = String(d).slice(0, 10)
+      const m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/)
+      if (!m) return s
+      return `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`
+    }
+    return [...list].sort((a, b) => {
+      const da = norm(a.date)
+      const db = norm(b.date)
+      if (da !== db) return db.localeCompare(da) // date DESC (newest first)
+      // Same date → tie-break by id DESC (most recently created first).
+      // `id` is the Dexie auto-increment, monotonic with insertion order.
+      return (b.id ?? 0) - (a.id ?? 0)
+    })
+  }, [collections, collectionsSearch])
 
   return (
     <div className="space-y-4">
@@ -436,14 +487,30 @@ export function Collections() {
 
       {/* Recent collections */}
       <Card>
-        <CardHeader>
+        <CardHeader className="flex flex-row items-center justify-between">
           <CardTitle className="text-sm">All Collections</CardTitle>
+          {/* Search filter — filters by Customer Name, Payment Mode,
+              Against Bills (invoice no), or Notes. Sorted strictly by
+              collection `date` descending (newest first); id breaks ties. */}
+          <div className="relative w-64">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              value={collectionsSearch}
+              onChange={(e) => setCollectionsSearch(e.target.value)}
+              placeholder="Search by customer, mode, bill, notes..."
+              className="h-8 pl-9 text-xs"
+            />
+          </div>
         </CardHeader>
         <CardContent>
-          {(collections ?? []).length === 0 ? (
+          {sortedFilteredCollections.length === 0 ? (
             <EmptyState
-              title="No collections yet"
-              description="Record your first payment receipt above."
+              title={collectionsSearch.trim() ? 'No matches' : 'No collections yet'}
+              description={
+                collectionsSearch.trim()
+                  ? 'No collections match your search. Try a different keyword.'
+                  : 'Record your first payment receipt above.'
+              }
               icon={<Wallet className="h-6 w-6" />}
             />
           ) : (
@@ -461,7 +528,7 @@ export function Collections() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {(collections ?? []).slice(0, 200).map((c) => (
+                  {sortedFilteredCollections.slice(0, 200).map((c) => (
                     <TableRow key={c.id}>
                       <TableCell className="text-xs">{formatDate(c.date)}</TableCell>
                       <TableCell className="text-sm">{c.customer_name}</TableCell>
