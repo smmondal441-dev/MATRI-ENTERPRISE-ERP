@@ -14,6 +14,7 @@ import {
   Wallet,
   Warehouse,
   FileText,
+  CalendarRange,
   Settings,
   Menu,
   X,
@@ -34,6 +35,7 @@ import { SalesLedger } from '@/components/erp/modules/SalesLedger'
 import { Collections } from '@/components/erp/modules/Collections'
 import { Inventory } from '@/components/erp/modules/Inventory'
 import { GstReports } from '@/components/erp/modules/GstReports'
+import { MonthlyBillSummary } from '@/components/erp/modules/MonthlyBillSummary'
 import { Settings as SettingsModule } from '@/components/erp/modules/Settings'
 import { Damages } from '@/components/erp/modules/Damages'
 import { StockReturns } from '@/components/erp/modules/StockReturns'
@@ -52,6 +54,7 @@ export type ModuleKey =
   | 'damages'
   | 'returns'
   | 'gst-reports'
+  | 'monthly-bills'
   | 'recycle-bin'
   | 'settings'
 
@@ -74,6 +77,7 @@ const NAV_ITEMS: NavItem[] = [
   { key: 'damages', label: 'Damage & Adjustment', icon: AlertTriangle, group: 'Stock' },
   { key: 'returns', label: 'Stock Returns', icon: Undo2, group: 'Stock' },
   { key: 'gst-reports', label: 'GST & Tax Reports', icon: FileText, group: 'Reports' },
+  { key: 'monthly-bills', label: 'Monthly Bill Summary', icon: CalendarRange, group: 'Reports' },
   { key: 'recycle-bin', label: 'Recycle Bin', icon: Recycle, group: 'System' },
   { key: 'settings', label: 'Settings & Backup', icon: Settings, group: 'System' },
 ]
@@ -221,6 +225,8 @@ export default function Home() {
         return <StockReturns />
       case 'gst-reports':
         return <GstReports />
+      case 'monthly-bills':
+        return <MonthlyBillSummary />
       case 'recycle-bin':
         return <RecycleBin />
       case 'settings':
