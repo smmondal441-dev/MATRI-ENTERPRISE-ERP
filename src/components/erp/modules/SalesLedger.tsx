@@ -9,6 +9,7 @@ import {
   formatDate,
   downloadCSV,
   todayISO,
+  sortByDateDesc,
 } from '@/lib/utils/format'
 import { PageHeader, EmptyState } from '@/components/erp/EmptyState'
 import { Card, CardContent } from '@/components/ui/card'
@@ -89,7 +90,10 @@ export function SalesLedger() {
           s.customer_name.toLowerCase().includes(q)
       )
     }
-    return list
+    // Strict date-wise sorting (newest business date first) — backdated
+    // entries sit at their exact date position; `id` DESC is only a
+    // tie-breaker for rows sharing the same date.
+    return sortByDateDesc(list)
   }, [sales, mode, fromDate, toDate, search])
 
   const totals = useMemo(() => {

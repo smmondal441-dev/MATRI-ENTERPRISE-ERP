@@ -21,7 +21,6 @@ import { useProducts, usePurchases } from '@/lib/hooks/use-erp'
 import {
   PurchaseService,
   getPurchaseRatePerOuterUnit,
-  getPurchaseRatePerPiece,
   type PurchaseDraftItem,
 } from '@/lib/services/repository'
 import {
@@ -29,6 +28,8 @@ import {
   formatNumber,
   formatDate,
   todayISO,
+  normalizeDateKey,
+  sortByDateDesc,
 } from '@/lib/utils/format'
 import type { Product } from '@/lib/db/dexie'
 import { PageHeader, EmptyState } from '@/components/erp/EmptyState'
@@ -37,6 +38,13 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import {
   Table,
   TableBody,
@@ -56,6 +64,8 @@ import {
   X,
   Receipt,
   Pencil,
+  Search,
+  CalendarX,
 } from 'lucide-react'
 
 // ---- Cart line interface ----
@@ -292,53 +302,73 @@ export function PurchaseEntry() {
   }
 
   // ---- Purchase Edit Dialog state ----
+  // Upgrade 2 — `date` and `gst_percent` are now fully editable alongside
+  // qty / rate / MFG / expiry. Every change live-recalculates taxable,
+  // CGST, SGST and total (see the dialog footer + saveEdit).
   const [editPurchase, setEditPurchase] = useState<any | null>(null)
+  const [editDate, setEditDate] = useState('')
   const [editBagQty, setEditBagQty] = useState(0)
   const [editPcsQty, setEditPcsQty] = useState(0)
   const [editRate, setEditRate] = useState(0)
+  const [editGst, setEditGst] = useState(0)
   const [editMfg, setEditMfg] = useState('')
   const [editExpiry, setEditExpiry] = useState('')
   const [editSaving, setEditSaving] = useState(false)
 
   const openEdit = (p: any) => {
     setEditPurchase(p)
+    setEditDate(normalizeDateKey(p.date) || todayISO())
     setEditBagQty(p.bag_qty)
     setEditPcsQty(p.pcs_qty)
     setEditRate(p.purchase_rate)
+    setEditGst(p.gst_percent)
     setEditMfg(p.mfg_date ?? '')
     setEditExpiry(p.expiry_date ?? '')
+  }
+
+  // Live recalculation shared by the edit dialog preview + saveEdit().
+  // Recomputes totalPcs / per-piece rate / taxable / CGST / SGST / total from
+  // the CURRENTLY EDITED qty, rate and GST percent — never trusts stale
+  // amounts from the original row.
+  const computeEditTotals = () => {
+    const prod = (products ?? []).find(
+      (p) => String(p.id) === String(editPurchase?.product_id)
+    )
+    const isLoose = prod?.is_loose === true
+    const cf = prod ? Number(prod.conversion_factor) || 1 : 1
+    const safeCf = !isLoose && cf > 0 ? cf : 1
+    const totalPcs = isLoose ? editPcsQty : editBagQty * safeCf + editPcsQty
+    const perPiece = safeCf > 0 ? editRate / safeCf : editRate
+    const taxable = totalPcs * perPiece
+    const cgst = (taxable * (editGst / 2)) / 100
+    const sgst = (taxable * (editGst / 2)) / 100
+    const total = taxable + cgst + sgst
+    return { prod, isLoose, cf: safeCf, totalPcs, taxable, cgst, sgst, total }
   }
 
   const saveEdit = async () => {
     if (!editPurchase) return
     setEditSaving(true)
     try {
-      const prod = (products ?? []).find(
-        (p) => String(p.id) === String(editPurchase.product_id)
-      )
-      const cf = prod?.conversion_factor ?? 1
-      const totalPcs = prod?.is_loose ? editPcsQty : editBagQty * cf + editPcsQty
-      const purchaseRatePerPiece = cf > 0 ? editRate / cf : editRate
-      const taxable = totalPcs * purchaseRatePerPiece
-      const gst = editPurchase.gst_percent
-      const cgst = (taxable * (gst / 2)) / 100
-      const sgst = (taxable * (gst / 2)) / 100
-      const total = taxable + cgst + sgst
+      // Recalculate from the edited fields — rate, qty, GST and the newly
+      // editable date all flow into the saved row.
+      const { prod, isLoose, totalPcs, taxable, cgst, sgst, total } =
+        computeEditTotals()
 
       await PurchaseService.update(editPurchase.id!, {
         bill_no: editPurchase.bill_no,
-        date: editPurchase.date,
+        date: editDate || editPurchase.date,
         supplier_name: editPurchase.supplier_name,
         supplier_gstin: editPurchase.supplier_gstin,
         product_id: editPurchase.product_id,
         product_sku: editPurchase.product_sku,
         product_name: editPurchase.product_name,
         hsn_code: editPurchase.hsn_code,
-        bag_qty: prod?.is_loose ? 0 : editBagQty,
+        bag_qty: isLoose ? 0 : editBagQty,
         pcs_qty: editPcsQty,
         total_pcs: totalPcs,
         purchase_rate: editRate,
-        gst_percent: gst,
+        gst_percent: editGst,
         taxable_amount: taxable,
         cgst,
         sgst,
@@ -348,7 +378,11 @@ export function PurchaseEntry() {
       })
       toast({
         title: 'Purchase updated',
-        description: `${editPurchase.bill_no} — stock adjusted`,
+        description: `${editPurchase.bill_no} — stock & totals adjusted${
+          prod && editRate !== getPurchaseRatePerOuterUnit(prod)
+            ? ' · product master rate updated'
+            : ''
+        }`,
       })
       setEditPurchase(null)
     } catch (e) {
@@ -360,6 +394,89 @@ export function PurchaseEntry() {
     } finally {
       setEditSaving(false)
     }
+  }
+
+  // ---- Upgrade 4 — Purchase log filters ----
+  // Month dropdown + From/To date range + free-text search, all combinable.
+  // All comparisons run on NORMALIZED dates (YYYY-M-D → YYYY-MM-DD) so legacy
+  // unpadded rows filter correctly.
+  const [monthFilter, setMonthFilter] = useState('all')
+  const [fromDate, setFromDate] = useState('')
+  const [toDate, setToDate] = useState('')
+  const [purchaseSearch, setPurchaseSearch] = useState('')
+
+  // Distinct months present in the purchase log, newest first.
+  // Derived from normalized dates so "2026-11-5" and "2026-11-05" collapse
+  // into the same "2026-11" bucket.
+  const purchaseMonths = useMemo(() => {
+    const set = new Set<string>()
+    for (const p of purchases ?? []) {
+      const key = normalizeDateKey(p.date).slice(0, 7) // "YYYY-MM"
+      if (key) set.add(key)
+    }
+    return Array.from(set).sort((a, b) => b.localeCompare(a)) // newest first
+  }, [purchases])
+
+  // Human label for a "YYYY-MM" key, e.g. "2026-11" → "November 2026".
+  const monthLabel = (key: string) => {
+    const [y, m] = key.split('-')
+    const d = new Date(Number(y), Number(m) - 1, 1)
+    return d.toLocaleDateString('en-IN', { month: 'long', year: 'numeric' })
+  }
+
+  // The filtered + strictly date-sorted purchase list (newest first).
+  // Month, date-range and search filters all apply together.
+  const filteredPurchases = useMemo(() => {
+    let list = purchases ?? []
+    if (monthFilter !== 'all') {
+      list = list.filter((p) => normalizeDateKey(p.date).slice(0, 7) === monthFilter)
+    }
+    if (fromDate) {
+      const from = normalizeDateKey(fromDate)
+      list = list.filter((p) => normalizeDateKey(p.date) >= from)
+    }
+    if (toDate) {
+      const to = normalizeDateKey(toDate)
+      list = list.filter((p) => normalizeDateKey(p.date) <= to)
+    }
+    const q = purchaseSearch.trim().toLowerCase()
+    if (q) {
+      list = list.filter(
+        (p) =>
+          p.bill_no.toLowerCase().includes(q) ||
+          p.supplier_name.toLowerCase().includes(q) ||
+          p.product_name.toLowerCase().includes(q) ||
+          p.product_sku.toLowerCase().includes(q)
+      )
+    }
+    return sortByDateDesc(list)
+  }, [purchases, monthFilter, fromDate, toDate, purchaseSearch])
+
+  // Summary totals for the FILTERED rows — shown above the purchase log so
+  // the header always reflects exactly what the filters selected.
+  const purchaseLogTotals = useMemo(() => {
+    return filteredPurchases.reduce(
+      (acc, p) => {
+        acc.entries += 1
+        acc.totalPcs += p.total_pcs
+        acc.taxable += p.taxable_amount
+        acc.cgst += p.cgst
+        acc.sgst += p.sgst
+        acc.total += p.total_amount
+        return acc
+      },
+      { entries: 0, totalPcs: 0, taxable: 0, cgst: 0, sgst: 0, total: 0 }
+    )
+  }, [filteredPurchases])
+
+  const hasActivePurchaseFilters =
+    monthFilter !== 'all' || !!fromDate || !!toDate || !!purchaseSearch.trim()
+
+  const clearPurchaseFilters = () => {
+    setMonthFilter('all')
+    setFromDate('')
+    setToDate('')
+    setPurchaseSearch('')
   }
 
   return (
@@ -641,19 +758,103 @@ export function PurchaseEntry() {
         </CardContent>
       </Card>
 
-      {/* ---------- Recent purchases (read-only log) ---------- */}
+      {/* ---------- Purchase log (filterable + strictly date-sorted) ---------- */}
       <Card>
         <CardContent className="p-4">
           <div className="mb-3 flex items-center justify-between">
             <h3 className="text-sm font-semibold">Recent Purchases</h3>
             <span className="text-xs text-muted-foreground">
-              {purchases?.length ?? 0} entries
+              {filteredPurchases.length} of {purchases?.length ?? 0} entries
             </span>
           </div>
-          {(purchases ?? []).length === 0 ? (
+
+          {/* ---- Upgrade 4 — filter toolbar (month + date range + search) ---- */}
+          <div className="mb-3 grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-12">
+            {/* Month filter — auto-populated from existing purchase dates,
+                newest month first */}
+            <div className="lg:col-span-3">
+              <Label className="mb-1 block text-xs font-medium">Month</Label>
+              <Select value={monthFilter} onValueChange={setMonthFilter}>
+                <SelectTrigger className="h-9 text-xs">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All Months</SelectItem>
+                  {purchaseMonths.map((m) => (
+                    <SelectItem key={m} value={m}>
+                      {monthLabel(m)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            {/* From Date */}
+            <div className="lg:col-span-2">
+              <Label className="mb-1 block text-xs font-medium">From Date</Label>
+              <Input
+                type="date"
+                value={fromDate}
+                onChange={(e) => setFromDate(e.target.value)}
+                className="h-9 text-xs"
+              />
+            </div>
+            {/* To Date */}
+            <div className="lg:col-span-2">
+              <Label className="mb-1 block text-xs font-medium">To Date</Label>
+              <Input
+                type="date"
+                value={toDate}
+                onChange={(e) => setToDate(e.target.value)}
+                className="h-9 text-xs"
+              />
+            </div>
+            {/* Quick search — invoice no / supplier / product */}
+            <div className="lg:col-span-4">
+              <Label className="mb-1 block text-xs font-medium">Search</Label>
+              <div className="relative">
+                <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  value={purchaseSearch}
+                  onChange={(e) => setPurchaseSearch(e.target.value)}
+                  placeholder="Invoice no / supplier / product..."
+                  className="h-9 pl-8 text-xs"
+                />
+              </div>
+            </div>
+            {/* Clear — resets month + date range + search in one click */}
+            <div className="flex items-end lg:col-span-1">
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-9 w-full px-2"
+                onClick={clearPurchaseFilters}
+                disabled={!hasActivePurchaseFilters}
+                title="Clear month, date range and search filters"
+              >
+                <CalendarX className="h-4 w-4" />
+                <span className="ml-1 hidden xl:inline">Clear</span>
+              </Button>
+            </div>
+          </div>
+
+          {/* ---- Summary totals — reflect the FILTERED rows ---- */}
+          <div className="mb-3 grid grid-cols-2 gap-2 rounded-md border border-border bg-muted/30 p-2.5 sm:grid-cols-3 lg:grid-cols-6">
+            <Mini label="Entries" value={String(purchaseLogTotals.entries)} />
+            <Mini label="Total Qty" value={formatNumber(purchaseLogTotals.totalPcs, 2)} />
+            <Mini label="Taxable" value={formatINR(purchaseLogTotals.taxable)} />
+            <Mini label="CGST" value={formatINR(purchaseLogTotals.cgst)} />
+            <Mini label="SGST" value={formatINR(purchaseLogTotals.sgst)} />
+            <Mini label="Grand Total" value={formatINR(purchaseLogTotals.total)} bold />
+          </div>
+
+          {filteredPurchases.length === 0 ? (
             <EmptyState
-              title="No purchases yet"
-              description="Record your first supplier invoice above."
+              title={hasActivePurchaseFilters ? 'No purchases match the filters' : 'No purchases yet'}
+              description={
+                hasActivePurchaseFilters
+                  ? 'Try clearing the month / date-range / search filters above.'
+                  : 'Record your first supplier invoice above.'
+              }
               icon={<Truck className="h-6 w-6" />}
             />
           ) : (
@@ -666,6 +867,7 @@ export function PurchaseEntry() {
                     <TableHead>Supplier</TableHead>
                     <TableHead>Product</TableHead>
                     <TableHead className="text-right">Qty</TableHead>
+                    <TableHead className="text-right">Rate</TableHead>
                     <TableHead className="text-right">GST%</TableHead>
                     <TableHead className="text-right">Taxable</TableHead>
                     <TableHead className="text-right">Total</TableHead>
@@ -673,7 +875,7 @@ export function PurchaseEntry() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {(purchases ?? []).slice(0, 100).map((p) => (
+                  {filteredPurchases.slice(0, 200).map((p) => (
                     <TableRow key={p.id}>
                       <TableCell className="text-xs">{formatDate(p.date)}</TableCell>
                       <TableCell className="font-mono text-xs">{p.bill_no}</TableCell>
@@ -689,6 +891,9 @@ export function PurchaseEntry() {
                         <div className="text-[10px] text-muted-foreground">
                           {formatNumber(p.total_pcs, p.bag_qty > 0 ? 0 : 2)} {p.bag_qty > 0 ? 'Pcs' : 'units'}
                         </div>
+                      </TableCell>
+                      <TableCell className="text-right text-xs font-medium">
+                        {formatINR(p.purchase_rate)}
                       </TableCell>
                       <TableCell className="text-right text-xs">{p.gst_percent}%</TableCell>
                       <TableCell className="text-right text-xs">
@@ -724,6 +929,12 @@ export function PurchaseEntry() {
               </Table>
             </div>
           )}
+
+          {/* Strict date-sort hint */}
+          <p className="mt-2 text-[10px] text-muted-foreground">
+            Entries are sorted strictly by invoice date (newest first) — backdated
+            entries appear at their exact date position.
+          </p>
         </CardContent>
       </Card>
 
@@ -744,20 +955,22 @@ export function PurchaseEntry() {
             </div>
             <div className="grid grid-cols-2 gap-3">
               {(() => {
-                const prod = (products ?? []).find(
-                  (p) => String(p.id) === String(editPurchase.product_id)
-                )
-                const isLoose = prod?.is_loose
-                const cf = prod?.conversion_factor ?? 1
-                const totalPcs = isLoose ? editPcsQty : editBagQty * cf + editPcsQty
-                const perPiece = cf > 0 ? editRate / cf : editRate
-                const taxable = totalPcs * perPiece
-                const gst = editPurchase.gst_percent
-                const cgst = (taxable * (gst / 2)) / 100
-                const sgst = (taxable * (gst / 2)) / 100
-                const total = taxable + cgst + sgst
+                // Live recalculation from the edited fields (Upgrade 2) —
+                // taxable / CGST / SGST / total update as the user types.
+                const { prod, isLoose, totalPcs, taxable, cgst, sgst, total } =
+                  computeEditTotals()
                 return (
                   <>
+                    {/* Upgrade 2 — the business date is now editable. After
+                        saving, the row automatically moves to its correct
+                        date-wise position in the log above. */}
+                    <Field label="Invoice Date">
+                      <Input
+                        type="date"
+                        value={editDate}
+                        onChange={(e) => setEditDate(e.target.value)}
+                      />
+                    </Field>
                     {isLoose ? (
                       <Field label={`Qty (${prod?.base_unit ?? 'Kg'})`}>
                         <Input
@@ -769,24 +982,24 @@ export function PurchaseEntry() {
                         />
                       </Field>
                     ) : (
-                      <>
-                        <Field label={`Bag Qty (1 Bag = ${cf} Pcs)`}>
-                          <Input
-                            type="number"
-                            min={0}
-                            value={editBagQty}
-                            onChange={(e) => setEditBagQty(Number(e.target.value))}
-                          />
-                        </Field>
-                        <Field label="Extra Pcs">
-                          <Input
-                            type="number"
-                            min={0}
-                            value={editPcsQty}
-                            onChange={(e) => setEditPcsQty(Number(e.target.value))}
-                          />
-                        </Field>
-                      </>
+                      <Field label={`Bag Qty (1 Bag = ${prod?.conversion_factor ?? 1} Pcs)`}>
+                        <Input
+                          type="number"
+                          min={0}
+                          value={editBagQty}
+                          onChange={(e) => setEditBagQty(Number(e.target.value))}
+                        />
+                      </Field>
+                    )}
+                    {!isLoose && (
+                      <Field label="Extra Pcs">
+                        <Input
+                          type="number"
+                          min={0}
+                          value={editPcsQty}
+                          onChange={(e) => setEditPcsQty(Number(e.target.value))}
+                        />
+                      </Field>
                     )}
                     <Field label={`Purchase Rate (per ${isLoose ? prod?.base_unit : prod?.outer_unit})`}>
                       <Input
@@ -795,6 +1008,16 @@ export function PurchaseEntry() {
                         step="0.01"
                         value={editRate}
                         onChange={(e) => setEditRate(Number(e.target.value))}
+                      />
+                    </Field>
+                    {/* Upgrade 2 — GST% editable; CGST/SGST recalc live */}
+                    <Field label="GST %">
+                      <Input
+                        type="number"
+                        min={0}
+                        step="0.5"
+                        value={editGst}
+                        onChange={(e) => setEditGst(Number(e.target.value))}
                       />
                     </Field>
                     <Field label="MFG Date">
@@ -812,7 +1035,7 @@ export function PurchaseEntry() {
                       />
                     </Field>
                     <div className="col-span-2 rounded-md border border-border bg-muted/30 p-2 text-xs">
-                      <div className="grid grid-cols-3 gap-2">
+                      <div className="grid grid-cols-3 gap-2 sm:grid-cols-5">
                         <div>
                           <div className="text-[10px] text-muted-foreground">Total Pcs</div>
                           <div className="font-semibold">{formatNumber(totalPcs, isLoose ? 2 : 0)}</div>
@@ -820,6 +1043,14 @@ export function PurchaseEntry() {
                         <div>
                           <div className="text-[10px] text-muted-foreground">Taxable</div>
                           <div className="font-semibold">{formatINR(taxable)}</div>
+                        </div>
+                        <div>
+                          <div className="text-[10px] text-muted-foreground">CGST</div>
+                          <div className="font-semibold">{cgst > 0 ? formatINR(cgst) : '—'}</div>
+                        </div>
+                        <div>
+                          <div className="text-[10px] text-muted-foreground">SGST</div>
+                          <div className="font-semibold">{sgst > 0 ? formatINR(sgst) : '—'}</div>
                         </div>
                         <div>
                           <div className="text-[10px] text-muted-foreground">Total</div>

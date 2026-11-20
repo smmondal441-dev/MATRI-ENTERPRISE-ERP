@@ -22,6 +22,7 @@ import {
   formatDate,
   todayISO,
   downloadCSV,
+  sortByDateDesc,
 } from '@/lib/utils/format'
 import { PageHeader, EmptyState } from '@/components/erp/EmptyState'
 import { Combobox } from '@/components/erp/Combobox'
@@ -339,7 +340,10 @@ function PurchaseReturnTab() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {(returns ?? []).slice(0, 200).map((r) => (
+                  {/* Strict date-wise sorting (newest business date first) —
+                      shared helper; backdated entries sit at their exact
+                      date position. */}
+                  {sortByDateDesc(returns ?? []).slice(0, 200).map((r) => (
                     <TableRow key={r.id}>
                       <TableCell className="text-xs">{formatDate(r.date)}</TableCell>
                       <TableCell className="font-mono text-xs">{r.return_no}</TableCell>
@@ -655,7 +659,10 @@ function SalesReturnTab() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {(returns ?? []).slice(0, 200).map((r) => (
+                  {/* Strict date-wise sorting (newest business date first) —
+                      shared helper; backdated entries sit at their exact
+                      date position. */}
+                  {sortByDateDesc(returns ?? []).slice(0, 200).map((r) => (
                     <TableRow key={r.id}>
                       <TableCell className="text-xs">{formatDate(r.date)}</TableCell>
                       <TableCell className="font-mono text-xs">{r.return_no}</TableCell>

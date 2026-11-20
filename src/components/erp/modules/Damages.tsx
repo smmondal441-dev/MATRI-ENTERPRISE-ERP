@@ -15,6 +15,7 @@ import {
   formatDate,
   todayISO,
   downloadCSV,
+  sortByDateDesc,
 } from '@/lib/utils/format'
 import { PageHeader, EmptyState } from '@/components/erp/EmptyState'
 import { Combobox } from '@/components/erp/Combobox'
@@ -561,7 +562,10 @@ export function Damages() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {(damages ?? []).slice(0, 200).map((d) => {
+                    {/* Strict date-wise sorting (newest business date first) —
+                        shared helper; backdated entries sit at their exact
+                        date position. */}
+                    {sortByDateDesc(damages ?? []).slice(0, 200).map((d) => {
                       // Upgrade 3 — resolve source badge. Treat undefined
                       // (legacy rows) as 'godown'.
                       const src: DamageSource = d.damage_source === 'store' ? 'store' : 'godown'

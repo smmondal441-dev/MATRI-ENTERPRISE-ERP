@@ -18,6 +18,7 @@ import {
   formatINR,
   formatDate,
   todayISO,
+  sortByDateDesc,
 } from '@/lib/utils/format'
 import type { Customer } from '@/lib/db/dexie'
 import { PageHeader, EmptyState } from '@/components/erp/EmptyState'
@@ -243,11 +244,13 @@ export function Collections() {
   // ---- All Collections: search filter + strict date-desc sorting ----
   // Filter: matches Customer Name, Payment Mode, Against Bills (invoice_no),
   //         or Notes (case-insensitive substring match).
-  // Sort:   STRICT by `date` field descending (newest first).
+  // Sort:   STRICT by `date` field descending (newest first) via the shared
+  //         sortByDateDesc() helper (normalizeDateKey pads YYYY-M-D →
+  //         YYYY-MM-DD so string comparison is chronological).
   //         Backdated entries (e.g. a 5 Nov entry created on 19 Nov) must
   //         appear in the 5 Nov position, NOT at the top. The `id` (Dexie
-  //         auto-increment, which is monotonic with creation order) is used
-  //         ONLY as a tie-breaker when two entries share the exact same date.
+  //         auto-increment, monotonic with creation order) is used ONLY as a
+  //         tie-breaker when two entries share the exact same date.
   const sortedFilteredCollections = useMemo(() => {
     const q = collectionsSearch.trim().toLowerCase()
     let list = collections ?? []
@@ -268,23 +271,9 @@ export function Collections() {
         )
       })
     }
-    // Defensive date normalization: pad YYYY-M-D → YYYY-MM-DD so string
-    // comparison matches chronological order. Falls back to '' on invalid input.
-    const norm = (d: string | undefined): string => {
-      if (!d) return ''
-      const s = String(d).slice(0, 10)
-      const m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/)
-      if (!m) return s
-      return `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`
-    }
-    return [...list].sort((a, b) => {
-      const da = norm(a.date)
-      const db = norm(b.date)
-      if (da !== db) return db.localeCompare(da) // date DESC (newest first)
-      // Same date → tie-break by id DESC (most recently created first).
-      // `id` is the Dexie auto-increment, monotonic with insertion order.
-      return (b.id ?? 0) - (a.id ?? 0)
-    })
+    // Shared helper: date DESC (normalized), tie-break id DESC then
+    // created_at DESC. Non-mutating.
+    return sortByDateDesc(list)
   }, [collections, collectionsSearch])
 
   return (

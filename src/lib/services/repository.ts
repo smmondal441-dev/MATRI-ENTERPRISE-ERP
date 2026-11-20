@@ -10,6 +10,7 @@
 
 import { db } from '@/lib/db/dexie'
 import { scheduleSync } from '@/lib/services/sync'
+import { sortByDateDesc } from '@/lib/utils/format'
 import type {
   Product,
   Customer,
@@ -169,6 +170,52 @@ function isoBusinessDate(val: any): string {
 function isoNullableBusinessDate(val: any): string | undefined {
   if (val === null || val === undefined || val === '') return undefined
   return String(val).slice(0, 10)
+}
+
+// ----------------------------------------------------------------------------
+// Auto-update Product Master when a Purchase rate changes (Upgrade 3)
+// ----------------------------------------------------------------------------
+
+/**
+ * Build the product-master patch that applies a NEW purchase rate (per outer
+ * unit / per Kg for loose) coming from a Purchase Entry (create or edit).
+ *
+ * Semantics ("latest batch rate wins" — standard ERP behaviour):
+ *   - purchase_rate_per_outer_unit  → newRate
+ *   - purchase_rate_per_piece       → newRate / (is_loose ? 1 : conversion_factor || 1)
+ *     (divide-by-zero guarded: conversion_factor <= 0 → treated as 1)
+ *   - legacy aliases `purchase_rate` / `purchase_rate_per_pcs` are only
+ *     included when already present on the row (requirement: "if present")
+ *   - all OTHER product fields (selling rates, stock, HSN, ...) untouched.
+ *
+ * Returns `null` when the new rate is NOT actually different from the
+ * product's current purchase rate (no update needed), otherwise the patch
+ * object to merge into db.products.update() — including the isSynced=false
+ * flag so the product is queued for sync to Turso/Prisma.
+ */
+function buildPurchaseRatePatch(
+  prod: Product,
+  newRate: number
+): Record<string, number | boolean | string | null> | null {
+  const rate = Number(newRate) || 0
+  const current = getPurchaseRatePerOuterUnit(prod)
+  // Only touch the master when the rate actually changed.
+  if (rate === current) return null
+  // Loose products are bought/sold per Kg (conversion factor = 1).
+  const divisor = prod.is_loose ? 1 : Number(prod.conversion_factor) || 1
+  const safeDivisor = divisor > 0 ? divisor : 1 // divide-by-zero guard
+  const perPiece = rate / safeDivisor
+  const patch: Record<string, number | boolean | string | null> = {
+    purchase_rate_per_outer_unit: rate,
+    purchase_rate_per_piece: perPiece,
+    isSynced: false,
+    synced_at: null,
+  }
+  // Legacy aliases — only written when the row already carries them, so we
+  // never introduce fields the sync mapper doesn't expect on old rows.
+  if (prod.purchase_rate !== undefined) patch.purchase_rate = rate
+  if (prod.purchase_rate_per_pcs !== undefined) patch.purchase_rate_per_pcs = perPiece
+  return patch
 }
 
 // ----------------------------------------------------------------------------
@@ -534,12 +581,12 @@ export interface PurchaseDraft {
 }
 
 export const PurchaseService = {
+  // Strict date-wise sorting (newest business date first) — backdated entries
+  // sit at their exact date position. Tie-break: id DESC (creation order).
   async all(): Promise<Purchase[]> {
     return db.purchases
-      .orderBy('created_at')
-      .reverse()
       .toArray()
-      .then(rows => rows.filter(r => !r.is_deleted))
+      .then(rows => sortByDateDesc(rows.filter(r => !r.is_deleted)))
   },
 
   async create(p: Omit<Purchase, 'id' | 'created_at'>): Promise<number> {
@@ -557,15 +604,22 @@ export const PurchaseService = {
       })
       const prod = await db.products.get(p.product_id)
       if (prod) {
+        // Upgrade 3 — auto-update the product master when this purchase
+        // carries a NEW purchase rate (different from the product's current
+        // rate). buildPurchaseRatePatch() returns null when rates match.
+        const ratePatch = buildPurchaseRatePatch(prod, p.purchase_rate)
         await db.products.update(p.product_id, {
           opening_stock_pcs: prod.opening_stock_pcs + p.total_pcs,
           // v5 — product stock changed → mark un-synced so the backend gets the latest count
           isSynced: false,
           synced_at: null,
+          ...(ratePatch ?? {}),
         })
       }
       return purchaseId
     })
+    // Product master may have changed (rate update) → queue it for sync too.
+    scheduleSync('products')
     scheduleSync('purchases')
     return id
   },
@@ -627,21 +681,17 @@ export const PurchaseService = {
           createdIds.push(purchaseId as number)
 
           // ---- 2. Bump product stock + 3/4. Update purchase rate ----
+          // Upgrade 3 — buildPurchaseRatePatch() applies the new rate to the
+          // product master ONLY when it differs from the current rate (loose
+          // products divide by 1; conversion_factor <= 0 guarded to 1).
           const prod = await db.products.get(item.product_id)
           if (prod) {
-            const cf = Number(prod.conversion_factor) || 1
-            const newPerPiece = cf > 0 ? item.purchase_rate / cf : item.purchase_rate
+            const ratePatch = buildPurchaseRatePatch(prod, item.purchase_rate)
             await db.products.update(item.product_id, {
               opening_stock_pcs: prod.opening_stock_pcs + item.total_pcs,
-              // Latest batch rate wins — update the product master so future
-              // POS profit calculations use this batch's purchase rate.
-              purchase_rate_per_outer_unit: item.purchase_rate,
-              purchase_rate_per_piece: newPerPiece,
-              // Legacy aliases kept in sync
-              purchase_rate: item.purchase_rate,
-              purchase_rate_per_pcs: newPerPiece,
               isSynced: false,
               synced_at: null,
+              ...(ratePatch ?? {}),
             })
           }
         }
@@ -679,10 +729,24 @@ export const PurchaseService = {
         })
       }
 
-      // Step 2: update the purchase row
+      // Step 2: update the purchase row — with a DEFENSIVE recalculation of
+      // taxable / CGST / SGST / total from the (editable) rate, quantity and
+      // GST percent, so a caller passing stale amounts can never persist them.
+      // Loose products: qty is the weight itself (divisor 1). Packaged:
+      // total_pcs = bag_qty × conversion_factor + pcs_qty, taxable =
+      // total_pcs × (purchase_rate / conversion_factor).
+      const isLoose = prod ? prod.is_loose === true : false
       const cf = prod ? Number(prod.conversion_factor) || 1 : 1
-      const newTotalPcs = patch.total_pcs
-      const newPerPiece = cf > 0 ? patch.purchase_rate / cf : patch.purchase_rate
+      const safeCf = !isLoose && cf > 0 ? cf : 1
+      const newTotalPcs = isLoose
+        ? patch.pcs_qty
+        : patch.bag_qty * safeCf + patch.pcs_qty
+      const newPerPiece = patch.purchase_rate / safeCf
+      const taxable = newTotalPcs * newPerPiece
+      const gstPercent = Number(patch.gst_percent) || 0
+      const cgst = (taxable * (gstPercent / 2)) / 100
+      const sgst = (taxable * (gstPercent / 2)) / 100
+      const total = taxable + cgst + sgst
       await db.purchases.update(id, {
         bill_no: patch.bill_no,
         date: isoBusinessDate(patch.date),
@@ -692,32 +756,31 @@ export const PurchaseService = {
         product_sku: patch.product_sku,
         product_name: patch.product_name,
         hsn_code: patch.hsn_code,
-        bag_qty: patch.bag_qty,
+        bag_qty: isLoose ? 0 : patch.bag_qty,
         pcs_qty: patch.pcs_qty,
         total_pcs: newTotalPcs,
         purchase_rate: patch.purchase_rate,
-        gst_percent: patch.gst_percent,
-        taxable_amount: patch.taxable_amount,
-        cgst: patch.cgst,
-        sgst: patch.sgst,
-        total_amount: patch.total_amount,
+        gst_percent: gstPercent,
+        taxable_amount: taxable,
+        cgst,
+        sgst,
+        total_amount: total,
         mfg_date: isoNullableBusinessDate(patch.mfg_date),
         expiry_date: isoNullableBusinessDate(patch.expiry_date),
         isSynced: false,
         synced_at: null,
       })
 
-      // Step 3: apply new stock + update product's purchase rate
+      // Step 3: apply new stock + update product's purchase rate.
+      // Upgrade 3 — the product master is only re-rated when the edited
+      // purchase_rate differs from the product's current rate.
       if (prod) {
+        const ratePatch = buildPurchaseRatePatch(prod, patch.purchase_rate)
         await db.products.update(patch.product_id, {
           opening_stock_pcs: prod.opening_stock_pcs - existing.total_pcs + newTotalPcs,
-          // Latest batch rate wins
-          purchase_rate_per_outer_unit: patch.purchase_rate,
-          purchase_rate_per_piece: newPerPiece,
-          purchase_rate: patch.purchase_rate,
-          purchase_rate_per_pcs: newPerPiece,
           isSynced: false,
           synced_at: null,
+          ...(ratePatch ?? {}),
         })
       }
     })
@@ -823,12 +886,11 @@ export interface SaleDraft {
 }
 
 export const SaleService = {
+  // Strict date-wise sorting (newest business date first) — see sortByDateDesc.
   async all(): Promise<Sale[]> {
     return db.sales
-      .orderBy('created_at')
-      .reverse()
       .toArray()
-      .then(rows => rows.filter(r => !r.is_deleted))
+      .then(rows => sortByDateDesc(rows.filter(r => !r.is_deleted)))
   },
 
   async get(id: number): Promise<{ sale: Sale; items: SaleItem[] } | undefined> {
@@ -1117,8 +1179,9 @@ export const SaleService = {
 // ----------------------------------------------------------------------------
 
 export const CollectionService = {
+  // Strict date-wise sorting (newest business date first) — see sortByDateDesc.
   async all(): Promise<Collection[]> {
-    return db.collections.orderBy('created_at').reverse().toArray()
+    return db.collections.toArray().then(rows => sortByDateDesc(rows))
   },
 
   async byCustomer(customerId: number): Promise<Collection[]> {
@@ -1630,8 +1693,9 @@ export const SettingsService = {
 // ----------------------------------------------------------------------------
 
 export const DamageService = {
+  // Strict date-wise sorting (newest business date first) — see sortByDateDesc.
   async all(): Promise<Damage[]> {
-    return db.damages.orderBy('created_at').reverse().toArray()
+    return db.damages.toArray().then(rows => sortByDateDesc(rows))
   },
 
   async create(d: Omit<Damage, 'id' | 'created_at'>): Promise<number> {
@@ -1720,8 +1784,9 @@ export const DamageService = {
 // ----------------------------------------------------------------------------
 
 export const PurchaseReturnService = {
+  // Strict date-wise sorting (newest business date first) — see sortByDateDesc.
   async all(): Promise<PurchaseReturn[]> {
-    return db.purchase_returns.orderBy('created_at').reverse().toArray()
+    return db.purchase_returns.toArray().then(rows => sortByDateDesc(rows))
   },
 
   async nextReturnNo(): Promise<string> {
@@ -1793,8 +1858,9 @@ export const PurchaseReturnService = {
 // ----------------------------------------------------------------------------
 
 export const SalesReturnService = {
+  // Strict date-wise sorting (newest business date first) — see sortByDateDesc.
   async all(): Promise<SalesReturn[]> {
-    return db.sales_returns.orderBy('created_at').reverse().toArray()
+    return db.sales_returns.toArray().then(rows => sortByDateDesc(rows))
   },
 
   async nextReturnNo(): Promise<string> {

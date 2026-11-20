@@ -87,6 +87,54 @@ export function formatDate(iso: string): string {
 }
 
 // ----------------------------------------------------------------------------
+// Strict date-wise sorting (global — all transaction modules)
+// ----------------------------------------------------------------------------
+
+/**
+ * Normalize a business date string to a zero-padded `YYYY-MM-DD` key so that
+ * plain lexicographic string comparison always matches chronological order.
+ *
+ * Handles:
+ *   - "2026-11-5"  → "2026-11-05"  (single-digit month/day padding)
+ *   - "2026-11-05T18:30:00.000Z" → "2026-11-05" (ISO timestamps clipped)
+ *   - "" / undefined / garbage → "" (sorts to the oldest position)
+ */
+export function normalizeDateKey(d: string | undefined | null): string {
+  if (!d) return ''
+  const s = String(d).slice(0, 10)
+  const m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/)
+  if (!m) return s
+  return `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`
+}
+
+/**
+ * Sort transaction rows STRICTLY by their business `date` field, descending
+ * (newest first). Backdated entries (e.g. a 01-Nov entry recorded on 20-Nov)
+ * automatically sit at their exact date position — never at the top just
+ * because they were created last.
+ *
+ * Tie-breakers (only when two rows share the exact same normalized date):
+ *   1. `id` descending (Dexie auto-increment — monotonic with creation order)
+ *   2. `created_at` descending (fallback when ids are missing/equal)
+ *
+ * Non-mutating: returns a new array. Dates are normalized (YYYY-M-D →
+ * YYYY-MM-DD) before comparison so unpadded legacy values sort correctly.
+ */
+export function sortByDateDesc<
+  T extends { date?: string; id?: number; created_at?: string },
+>(rows: T[]): T[] {
+  return [...rows].sort((a, b) => {
+    const da = normalizeDateKey(a.date)
+    const db = normalizeDateKey(b.date)
+    if (da !== db) return db.localeCompare(da) // date DESC (newest first)
+    // Same date → newest created first (id DESC, then created_at DESC).
+    const idDiff = (b.id ?? 0) - (a.id ?? 0)
+    if (idDiff !== 0) return idDiff
+    return String(b.created_at ?? '').localeCompare(String(a.created_at ?? ''))
+  })
+}
+
+// ----------------------------------------------------------------------------
 // CSV / Excel export utilities
 // ----------------------------------------------------------------------------
 
